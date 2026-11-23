@@ -1,0 +1,84 @@
+SETUP, MIGRATION AND TEST INSTRUCTIONS
+======================================
+
+This file is plain text on purpose. It is the handover checklist for running the project outside the Rocket editor.
+
+1. WHAT TO EXPORT
+-----------------
+Include:
+  src/                         application source
+  package.json, package-lock.json   manifest and lockfile (npm)
+  next.config.mjs, tsconfig.json, vitest.config.ts, tailwind.config.js, postcss.config.js, .eslintrc.json
+  supabase/migrations/         database migrations, in the order listed in section 3
+  test-fixtures/               synthetic BOQ files
+  env.template.txt             variable names and placeholders only (copy to .env.local)
+Exclude:
+  .env, .env.local             real keys
+  node_modules/, .next/        generated
+  any uploaded client BOQ or confidential file
+
+2. INSTALL AND RUN
+------------------
+  npm ci
+  cp env.template.txt .env.local    then fill in NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY
+  npm run dev                       http://localhost:4028
+
+3. DATABASE MIGRATIONS (apply in this exact order, in the Supabase SQL editor or with the Supabase CLI)
+------------------------------------------------------------------------------------------------------
+  1. supabase/migrations/20261029180000_pvr_boq_cases.sql
+       Creates pvr_cases, pvr_boq_imports, pvr_boq_rows. It ALSO creates unrestricted anonymous policies.
+       Do not load real data until step 2 and step 3 have run.
+  2. supabase/migrations/20261029190000_pvr_boq_owner_rls.sql
+       Adds owner_id, ownership triggers, owner-only policies, revokes anon, creates private bucket pvr-boq-files.
+  3. supabase/migrations/20261029200000_pvr_boq_files_calculations.sql
+       Adds file-storage columns, the immutable pvr_calculations table, and DROPS any leftover policy on the
+       pvr_* tables or the BOQ bucket that is not an owner-only policy.
+All three are written to be safe to run more than once.
+
+Supabase Auth settings to check (Authentication -> Providers / URL Configuration):
+  - Email provider enabled.
+  - If "Confirm email" is ON, new accounts must confirm before signing in (the app shows instructions and a resend button).
+  - Add your site URL and  <site>/sign-up-login-screen  to the redirect allow-list so confirmation links return correctly.
+
+4. VERIFY THE DATABASE STATE (run in the SQL editor; do not paste results containing secrets or record contents)
+---------------------------------------------------------------------------------------------------------------
+  select tablename, rowsecurity from pg_tables where schemaname='public' and tablename like 'pvr_%';
+  select tablename, policyname, roles, cmd, qual, with_check from pg_policies where schemaname='public' and tablename like 'pvr_%' order by 1,2;
+  select policyname, cmd, qual, with_check from pg_policies where schemaname='storage' and tablename='objects' and (qual ilike '%pvr-boq-files%' or with_check ilike '%pvr-boq-files%');
+  select id, public from storage.buckets where id='pvr-boq-files';
+Expected: rowsecurity = true on all four pvr_ tables; every pvr_ policy name contains "_owner_" and is for role authenticated;
+no policy with qual "true"; bucket pvr-boq-files has public = false.
+
+5. AUTOMATED CHECKS (run these on your machine or CI; none of them were run by the author)
+-------------------------------------------------------------------------------------------
+  npm run typecheck        tsc --noEmit
+  npm run test:boq         vitest run src/lib/boq
+  npm test                 vitest run (all tests)
+  npm run build            next build (type errors now fail the build)
+  npm run verify           typecheck, then BOQ tests, then build
+
+6. MANUAL END-TO-END TEST (two accounts, A and B)
+-------------------------------------------------
+  Sign in as A.  Open /new-pvr.  Choose test-fixtures/boq-v1.csv.  Confirm the mapping and import.
+    Expect: "Record saved on server" and "Original file stored privately" on revision 1, marked Active.
+  Open the case workspace (Start analysis, or /case-workspace?case=<id>).
+    100 m2 addition, select TEST-001           -> AED 1,000.00. Click "Save this calculation".
+    20 m omission, select TEST-002             -> -AED 500.00.
+    Select TEST-003                            -> "Unpriced - not zero".
+    100 m against TEST-001 (m2)                -> blocked until a width, its unit and a basis are given; 100 m x 3 m = 300 m2.
+  Upload test-fixtures/boq-v2-rate12.csv as a second import.
+    Expect: it is NOT Active. The saved AED 1,000 calculation is still Current. Case still uses revision 1.
+  Click "Make active" on revision 2.
+    Expect: the AED 1,000 calculation becomes "Needs review / recalculation" and names revision 1 -> 2, rate 10 -> 12.
+    Click "Review remapped item and recalculate", save -> AED 1,200.00 as a new record. The old record is kept.
+  Upload test-fixtures/boq-zero-rate.csv and make it active: TEST-001 gives AED 0.00 (explicit zero), TEST-003 stays unpriced.
+  Click "View original file" on an import: a short-lived signed link opens the stored file.
+  Sign in as B and open A's /case-workspace?case=<id>.  Expect "Case not found for your account".
+  Reload the page and sign out/in as A: the case, imports and calculations are still there.
+
+7. KNOWN LIMITS
+---------------
+  - Access is owner-only. There is no project-team or shared-case permission system.
+  - Password reset is not built.
+  - Only .xlsx and .csv BOQs. Formulas without a stored result stay unpriced and are not recalculated.
+  - The synthetic demo (/case-workspace?demo=1) is a separate engine and is labelled as such.
