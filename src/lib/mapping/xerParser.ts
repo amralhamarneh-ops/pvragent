@@ -238,6 +238,7 @@ export function parseXer(text: string, fileName = 'schedule.xer'): ScheduleModel
   const proj = rowsOf('PROJECT')[0];
   const dataDate = proj ? date(col('PROJECT', proj, 'last_recalc_date') || col('PROJECT', proj, 'sum_data_date')) : '';
   return {
+    rawTables: Object.fromEntries(tables),
     fileName, activityCount: activities.length, dataDate, activities, relationships, wbs, calendars, resources,
     activityCodeTypes: Array.from(actvTypes.values()), udfTypes: Array.from(udfTypes.values()), productivityFields, warnings, tablesFound: Array.from(tables.keys()),
   };
@@ -265,12 +266,13 @@ function statusOf(code: string, actualStart: string, actualFinish: string, pct: 
 /** Pull the exception dates out of a P6 clndr_data string without interpreting working hours. */
 function extractCalendarExceptions(data: string): string[] {
   if (!data) return [];
-  const block = data.match(/\(Exceptions\s*\(([\s\S]*?)\)\s*\)\s*\)?/);
-  if (!block) return [];
+  const marker = data.indexOf('Exceptions');
+  if (marker < 0) return [];
+  const block = data.slice(marker);
   const out: string[] = [];
   const re = /\(d\|(\d+)\)/g;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(block[1])) !== null) {
+  while ((m = re.exec(block)) !== null) {
     // P6 stores exception dates as days since 1899-12-30.
     const dt = new Date(Date.UTC(1899, 11, 30) + Number(m[1]) * 86400000);
     out.push(dt.toISOString().slice(0, 10));

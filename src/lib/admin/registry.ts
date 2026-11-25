@@ -314,3 +314,13 @@ export const agentById = (id: string): AgentDef | undefined => AGENTS.find((a) =
 
 export const STATUS_LABELS: Record<ImplStatus, string> = { implemented: 'Implemented', partial: 'Partially implemented', planned: 'Planned', missing: 'Missing' };
 export const KIND_LABELS: Record<AgentKind, string> = { ai_agent: 'AI agent', deterministic: 'Deterministic tool', workflow_service: 'Workflow service', hybrid: 'AI agent + deterministic validator' };
+
+// Capabilities exposed by the real-case validation changes.
+for (const agent of AGENTS) {
+  if (agent.id === 'drawing') {
+    agent.code.push('services/processing-worker/src/largeDxf.mjs', 'services/processing-worker/src/cad_inventory.py');
+    agent.gaps.push('Large DXF fallback provides an inventory only, not certified quantities or full geometry preview. Native DWG compatibility depends on the installed converter.');
+  }
+  if (agent.id === 'planning') agent.protectedControls.push('Preserve all raw XER tables and calendar exception dates; source preservation does not certify CPM equivalence.');
+  if (agent.id === 'boq_mapping') agent.protectedControls.push('Specification conflicts block automatic valuation; PVR claimed quantities remain distinct from drawing measurements.');
+}

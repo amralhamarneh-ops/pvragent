@@ -7,6 +7,7 @@
  * Everything else is COUNTED BY NAME as unsupported. Nothing is silently dropped and no "complete" claim is made
  * when unsupported content or XREFs exist.
  */
+import { inventoryLargeDxf } from './largeDxf.mjs';
 import { createHash } from 'node:crypto';
 
 const INSUNITS = { 4: { unit: 'mm', metres: 0.001 }, 5: { unit: 'cm', metres: 0.01 }, 6: { unit: 'm', metres: 1 } };
@@ -158,6 +159,7 @@ const HANDLED = new Set(['LINE', 'LWPOLYLINE', 'POLYLINE', 'CIRCLE', 'ARC', 'INS
  * cannot support).
  */
 export async function readDxfForWorker(fileName, bytes, { onBatch, shouldStop, parserLoader } = {}) {
+  if (bytes.byteLength > 480 * 1024 * 1024) return inventoryLargeDxf(bytes);
   const text = Buffer.from(bytes).toString('utf8');
   if (/^\s*AutoCAD Binary DXF/.test(text.slice(0, 40))) {
     return { ok: false, state: 'unsupported', error: 'Binary DXF is not supported. Export an ASCII DXF.' };

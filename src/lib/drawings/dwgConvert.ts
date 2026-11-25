@@ -90,7 +90,7 @@ export async function convertDwg(bytes: Uint8Array, env: Record<string, string |
         : await run(st.path, args, { timeout: timeoutMs });
     } else {
       converterVersion = await probeVersion('libredwg', st.path);
-      out = await run(st.path, ['--as', 'r2018', '-o', join(outDir, 'drawing.dxf'), inFile], { timeout: timeoutMs });
+      out = await run(st.path, ['--as', 'r2013', '-o', join(outDir, 'drawing.dxf'), inFile], { timeout: timeoutMs });
     }
     const warnings = warningLines(out.stdout, out.stderr);
     const produced = (await readdir(outDir)).find((f) => /\.dxf$/i.test(f));
