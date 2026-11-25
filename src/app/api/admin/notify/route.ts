@@ -10,6 +10,7 @@ export const maxDuration = 60;
 const URL_ = () => process.env.NEXT_PUBLIC_SUPABASE_URL;
 const KEY_ = () => process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 const fail = (e: unknown) => { const f = failureResponse(e); return NextResponse.json(f.body, { status: f.status }); };
+const providers = () => providerStatuses(process.env as Record<string, string | undefined>);
 const bad = (error: string, status = 400, extra: Record<string, unknown> = {}) => NextResponse.json({ error, ...extra }, { status });
 async function storeFor(req: NextRequest) { const u = await verifyUser(req.headers.get('authorization'), URL_(), KEY_()); return new AdminStore(URL_(), KEY_(), u); }
 
