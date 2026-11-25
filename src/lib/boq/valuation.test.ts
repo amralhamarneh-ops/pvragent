@@ -11,10 +11,10 @@ import { newItemDraftForTest } from './valuation.fixtures';
 import type { BoqItemRecord } from './types';
 import type { ChangeScope, ModelMatchResult, ScopeComponent } from './scope';
 
-const row = (over: Partial<BoqItemRecord> & { id: string; ref: string; unit: string; rate: string; description?: string }): BoqItemRecord => ({
-  id: over.id, importId: 'imp1', caseId: 'case1', sheet: 'Bill 1', rowNumber: Number(over.id.split('!').pop() ?? 1), bill: 'Bill 1', ref: over.ref, description: over.description ?? over.ref, unit: over.unit,
-  rate: { state: 'value', value: over.rate, text: over.rate, cell: 'E1', explicitZero: false, formulaStatus: 'none' } as unknown as BoqItemRecord['rate'],
-  quantity: { state: 'missing', text: '' } as BoqItemRecord['quantity'], cells: {}, sourceFile: 'roads.csv', sourceSha256: 'a'.repeat(64), currency: 'AED', ...over,
+const row = ({ id, ref, unit, rate, description = ref, ...overrides }: Omit<Partial<BoqItemRecord>, 'rate'> & { id: string; ref: string; unit: string; rate: string }): BoqItemRecord => ({
+  id, importId: 'imp1', caseId: 'case1', sheet: 'Bill 1', rowNumber: Number(id.split('!').pop() ?? 1), bill: 'Bill 1', ref, description, unit,
+  rate: { state: 'value', value: rate, text: rate, cell: 'E1', explicitZero: false, formulaStatus: 'none' },
+  quantity: { state: 'missing', text: '' }, cells: {}, sourceFile: 'roads.csv', sourceSha256: 'a'.repeat(64), currency: 'AED', ...overrides,
 });
 
 const comp = (p: Partial<ScopeComponent> & { id: string; name: string }): ScopeComponent => ({
