@@ -4,12 +4,11 @@
  */
 import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
-import { createRequire } from 'node:module';
+import { execFile } from 'node:child_process';
 import { mkdtemp, writeFile, readFile, readdir, rm, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const execFile = nodeRequire(['node:child', 'process'].join('_')).execFile;
 const run = promisify(execFile);
 const sha = (b) => createHash('sha256').update(b).digest('hex');
 
