@@ -213,6 +213,8 @@ export interface ScheduleWbsNode {
 }
 
 export interface ScheduleModel {
+  /** Lossless source tables, including scheduling options and resource rates. */
+  rawTables?: Record<string, { fields: string[]; rows: string[][] }>;
   fileName: string;
   activityCount: number;
   dataDate: string;

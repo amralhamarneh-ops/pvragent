@@ -9,6 +9,7 @@ import { mkdtemp, writeFile, readFile, readdir, rm, mkdir } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+const nodeRequire = createRequire(import.meta.url);
 const execFile = nodeRequire(['node:child', 'process'].join('_')).execFile;
 const run = promisify(execFile);
 const sha = (b) => createHash('sha256').update(b).digest('hex');
@@ -70,7 +71,7 @@ export async function convertDwg(bytes, { env = process.env, timeoutMs = 120_000
     if (st.converter === 'oda') {
       const args = [inDir, outDir, env.DWG_CONVERTER_OUTPUT_VERSION || 'ACAD2018', 'DXF', '0', '1'];
       out = env.DWG_CONVERTER_XVFB === '1' ? await run('xvfb-run', ['-a', st.path, ...args], opts) : await run(st.path, args, opts);
-    } else out = await run(st.path, ['--as', 'r2018', '-o', join(outDir, 'drawing.dxf'), inFile], opts);
+    } else out = await run(st.path, ['--as', 'r2013', '-o', join(outDir, 'drawing.dxf'), inFile], opts);
     const warnings = `${out.stdout}\n${out.stderr}`.split('\n').map((l) => l.trim()).filter((l) => /warn|error|unsupported|unknown|invalid|skip/i.test(l)).slice(0, 25);
     const produced = (await readdir(outDir)).find((f) => /\.dxf$/i.test(f));
     if (!produced) return { ok: false, error: 'The converter ran but produced no DXF (DWG version may be unsupported).', converter: st.converter, converterVersion: version, sourceSha256, warnings };

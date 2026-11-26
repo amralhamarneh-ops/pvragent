@@ -19,7 +19,7 @@ const SYNONYM_GROUPS: string[][] = [
   ['fill', 'backfill', 'embankment', 'filling', 'compacted'],
   ['subbase', 'sub-base', 'base', 'basecourse', 'aggregate', 'crushed', 'granular'],
   ['pavement', 'carriageway', 'road', 'roadway', 'paving'],
-  ['lighting', 'luminaire', 'lamp', 'streetlight', 'light', 'lantern', 'pole', 'column'],
+  ['lighting', 'luminaire', 'lamp', 'streetlight', 'light', 'lantern'],
   ['drainage', 'drain', 'culvert', 'pipe', 'storm', 'stormwater', 'gully', 'manhole', 'catchpit'],
   ['concrete', 'rc', 'reinforced', 'cast', 'insitu'],
   ['reinforcement', 'rebar', 'steel', 'bar', 'bars'],
@@ -30,7 +30,11 @@ const SYNONYM_GROUPS: string[][] = [
   ['wall', 'walling', 'masonry', 'block', 'blockwork'],
   ['door', 'doors', 'doorset'],
   ['window', 'windows', 'glazing'],
-  ['cable', 'cabling', 'wiring', 'conduit', 'duct'],
+  ['cable', 'cabling', 'wiring'],
+  ['duct', 'conduit'],
+  ['rvd', 'radar', 'detector'],
+  ['cctv', 'camera'],
+  ['foc', 'fiber', 'fibre', 'optic'],
 ];
 
 const STOP = new Set(['the', 'and', 'of', 'to', 'a', 'in', 'for', 'at', 'with', 'by', 'on', 'new', 'additional', 'extra', 'supply', 'install', 'provide', 'including', 'all', 'complete', 'as', 'per', 'from', 'or', 'an', 'be', 'is']);
