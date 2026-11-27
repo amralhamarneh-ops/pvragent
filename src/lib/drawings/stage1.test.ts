@@ -115,7 +115,10 @@ describe('uploaded revision pair → evidence-linked, curve-aware changes', () =
     const layerEvents = events.filter((e) => e.stage === 'geometry' && e.layer);
     // Both files report their real layers with real entity counts, as the parser finishes them.
     expect(new Set(layerEvents.map((e) => e.layer))).toEqual(new Set(['ROAD-CL', 'POND']));
-    expect(layerEvents.filter((e) => e.fileName === 'c.dxf').find((e) => e.layer === 'ROAD-CL')!.count).toBe(2);
+    const roadEvents = layerEvents.filter((e) => e.fileName === 'c.dxf' && e.layer === 'ROAD-CL');
+    // Stream messages may report total delivered entities; validate the layer's actual count separately.
+    expect(roadEvents.at(-1)?.count).toBe(2);
+    expect(out.drawings.find(d=>d.fileName==='c.dxf')?.entities.filter(e=>e.layer==='ROAD-CL')).toHaveLength(2);
     expect(layerEvents.every((e) => (e.count ?? 0) > 0)).toBe(true);
   });
   it('builds a view model from the uploaded geometry with true extents and linked changes', async () => {
@@ -308,7 +311,7 @@ describe('DWG conversion is honest about its dependency', () => {
     // A tiny shell "converter" that behaves like libredwg's dwg2dxf: writes the -o target.
     const { writeFile, chmod, mkdtemp } = await import('node:fs/promises'); const { tmpdir } = await import('node:os'); const { join } = await import('node:path');
     const dir = await mkdtemp(join(tmpdir(), 'fake-conv-')); const script = join(dir, 'dwg2dxf');
-    await writeFile(script, '#!/bin/sh\nwhile [ "$1" != "-o" ]; do shift; done\nshift\nprintf "0\\nSECTION\\n2\\nENTITIES\\n0\\nENDSEC\\n0\\nEOF\\n" > "$1"\n');
+    await writeFile(script, '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "dwg2dxf fixture 1"; exit 0; fi\nwhile [ "$#" -gt 0 ] && [ "$1" != "-o" ]; do shift; done\n[ "$#" -ge 2 ] || exit 2\nshift\nprintf "0\\nSECTION\\n2\\nHEADER\\n9\\n\\$ACADVER\\n1\\nAC1015\\n9\\n\\$INSUNITS\\n70\\n6\\n0\\nENDSEC\\n0\\nSECTION\\n2\\nENTITIES\\n0\\nLINE\\n5\\nA1\\n8\\nMODEL\\n10\\n0\\n20\\n0\\n11\\n10\\n21\\n0\\n0\\nENDSEC\\n0\\nEOF\\n" > "$1"\n');
     await chmod(script, 0o755);
     const r = await convertDwg(enc('AC1032'), { DWG_CONVERTER: 'libredwg', DWG_CONVERTER_PATH: script });
     expect(r.ok).toBe(true);

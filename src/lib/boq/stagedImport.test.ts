@@ -87,7 +87,7 @@ function makeServer(opts: { failBatchWrite?: (batchIndex: number) => boolean } =
         if (path === 'pvr_boq_rows') counters.rowInserts += 1;
         if (path === 'pvr_boq_import_batches') counters.batchInserts += 1;
       }
-      return new Response('', { status: 201 });
+      return new Response(/return=representation/i.test(headers.get('prefer') ?? '') ? JSON.stringify(list) : null, { status: 201 });
     }
     if (method === 'PATCH') {
       const patch = JSON.parse(String(init?.body)) as Row;
@@ -97,7 +97,7 @@ function makeServer(opts: { failBatchWrite?: (batchIndex: number) => boolean } =
     }
     if (method === 'DELETE') {
       tables[path] = rows.filter((r) => !(r.owner_id === uid && matches(r, q)));
-      return new Response('', { status: 204 });
+      return new Response(null, { status: 204 });
     }
     return new Response('', { status: 405 });
   };

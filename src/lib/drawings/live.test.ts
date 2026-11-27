@@ -175,8 +175,10 @@ describe('relocation evidence is tied to the object', () => {
 
 describe('ambiguous correspondence is flagged, not guessed', () => {
   it('flags one addition that could match two equal removals, even with evidence', async () => {
-    const o = dxfText([...text('DWG NO: A-1 REV: A'), ...lw('LIGHT', 'a', [[0, 0], [10, 0]]), ...lw('LIGHT', 'b', [[0, 20], [10, 20]])]);
-    const r = dxfText([...text('DWG NO: A-1 REV: B'), ...lw('LIGHT', 'c', [[0, 50], [10, 50]])]);
+    // Use unchanged site geometry to establish a shared coordinate frame independently of the moving lights.
+    const anchor = lw('COMMON', 'anchor', [[-20, -20], [-20, 70]]);
+    const o = dxfText([...text('DWG NO: A-1 REV: A'), ...anchor, ...lw('LIGHT', 'a', [[0, 0], [10, 0]]), ...lw('LIGHT', 'b', [[0, 20], [10, 20]])]);
+    const r = dxfText([...text('DWG NO: A-1 REV: B'), ...anchor, ...lw('LIGHT', 'c', [[0, 50], [10, 50]])]);
     const out = await analyseDocuments({ files: [dr('o.dxf', o), dr('r.dxf', r)], narrative: 'Lighting was relocated.' });
     const light = out.changes.filter((c) => c.component === 'LIGHT');
     expect(light.some((c) => c.change === 'modified')).toBe(false);

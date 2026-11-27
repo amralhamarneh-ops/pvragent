@@ -141,33 +141,44 @@ export function estimateOriginShift(o: DrawingFile, r: DrawingFile, tolM = 0.01)
   const mo = o.metresPerUnit; const mr = r.metresPerUnit;
   if (mo === null || mr === null || !o.entities.length || !r.entities.length) return null;
   const anchor = (e: DrawingEntity, m: number) => (e.vertices[0] ? { x: e.vertices[0].x * m, y: e.vertices[0].y * m } : null);
-  const key = (e: DrawingEntity) => `${e.layer}|${e.kind}|${e.blockName ?? ''}|${e.vertices.length}|${Math.round(sizeOf(e) * (e.area > 0 ? mo * mo : mo) * 100)}`;
+  const anchorKey = (e: DrawingEntity, m: number) =>
+    `${e.layer}|${e.kind}|${e.blockName ?? ''}|${e.vertices.length}|${Math.round(sizeOf(e) * (e.area > 0 ? m * m : m) * 100)}`;
   const byKey = new Map<string, DrawingEntity[]>();
-  for (const e of r.entities) { const k = `${e.layer}|${e.kind}|${e.blockName ?? ''}|${e.vertices.length}|${Math.round(sizeOf(e) * (e.area > 0 ? mr * mr : mr) * 100)}`; const a = byKey.get(k); if (a) a.push(e); else byKey.set(k, [e]); }
+  for (const e of r.entities) { const k = anchorKey(e,mr); const a = byKey.get(k); if (a) a.push(e); else byKey.set(k, [e]); }
   const votes = new Map<string, { dx: number; dy: number; n: number }>();
   const sample = o.entities.length > 400 ? o.entities.filter((_, i) => i % Math.ceil(o.entities.length / 400) === 0) : o.entities;
+  const byHandle = new Map<string, DrawingEntity | null>();
+  for (const e of r.entities) if (e.handle) byHandle.set(e.handle, byHandle.has(e.handle) ? null : e);
   for (const e of sample) {
-    const cands = byKey.get(key(e)); const a = anchor(e, mo);
-    if (!cands || !a || cands.length > 6) continue;
-    for (const c of cands) {
+    const a = anchor(e, mo);
+    if (!a) continue;
+    const cands = byKey.get(anchorKey(e,mo)) ?? [];
+    // Repeated shapes alone do not nominate shifts. A unique, shape-compatible handle can nominate one;
+    // the geometric coverage check below still has to confirm it independently of the handle.
+    const sameHandle = e.handle ? byHandle.get(e.handle) : null;
+    const choices = cands.length <= 6 ? cands : sameHandle && anchorKey(sameHandle,mr) === anchorKey(e,mo) ? [sameHandle] : [];
+    for (const c of choices) {
       const b = anchor(c, mr); if (!b) continue;
       const dx = a.x - b.x; const dy = a.y - b.y;
       const k = `${Math.round(dx / tolM)}|${Math.round(dy / tolM)}`;
       const v = votes.get(k); if (v) v.n += 1; else votes.set(k, { dx, dy, n: 1 });
     }
   }
-  let best: { dx: number; dy: number; n: number } | null = null;
-  votes.forEach((v) => { if (!best || v.n > best.n) best = v; });
-  if (!best) return null;
-  const b: { dx: number; dy: number; n: number } = best;
+  const ranked = [...votes.values()].sort((a,b)=>b.n-a.n);
+  const b = ranked[0];
+  if (!b) return null;
   if (Math.abs(b.dx) < tolM && Math.abs(b.dy) < tolM) return { dx: 0, dy: 0, matched: b.n, of: sample.length, accepted: false };
-  // Verify the offset: count sampled original elements that coincide with a revised element once the revised
-  // drawing is moved by (dx, dy) into the original's frame.
-  const rs = new Set<string>();
-  for (const e of r.entities) rs.add(entitySig(e, mr, tolM, b.dx, b.dy));
-  let matched = 0;
-  for (const e of sample) if (rs.has(entitySig(e, mo, tolM, 0, 0))) matched += 1;
-  const accepted = matched >= Math.max(3, Math.ceil(0.6 * sample.length));
+  // Verify distinct geometric signatures, not votes or duplicate copies. Also compare the nominated
+  // offset with zero and a tied candidate; a same-frame or equally plausible fit must not be shifted.
+  const uniqueOriginal = new Set(sample.map(e => entitySig(e,mo,tolM,0,0)));
+  const countAt = (dx: number,dy: number) => {
+    const translated = new Set(r.entities.map(e=>entitySig(e,mr,tolM,dx,dy)));
+    let count=0; for (const sig of uniqueOriginal) if(translated.has(sig)) count++;
+    return count;
+  };
+  const matched = countAt(b.dx,b.dy);
+  const tied = ranked[1] && ranked[1].n === b.n && countAt(ranked[1].dx,ranked[1].dy) >= matched;
+  const accepted = !tied && matched > countAt(0,0) && matched >= Math.max(3, Math.ceil(0.6 * uniqueOriginal.size));
   return { dx: b.dx, dy: b.dy, matched, of: sample.length, accepted };
 }
 
