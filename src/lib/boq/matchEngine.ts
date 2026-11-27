@@ -158,7 +158,7 @@ export function assemble(set: BoqSet, scope: ChangeScope, proposal: ModelMatchRe
 
   const unmatched: AssessmentOutcome['unmatched'] = [];
   const potentials: AssessmentOutcome['potentials'] = [];
-  const valuedRows = new Map<string, { componentId: string }>();
+  const valuedRows = new Map<string, ScopeComponent[]>();
 
   for (const comp of scope.components) {
     const potentialByModel = proposal.potentiallyAffected.find((p) => p.componentId === comp.id);
@@ -204,16 +204,17 @@ export function assemble(set: BoqSet, scope: ChangeScope, proposal: ModelMatchRe
       const l = toLine(primary, 'primary');
       // Different changes may legitimately price from the same BOQ row; each keeps its own line, quantity and amount.
       // The SAME work repeated (same name, action and location) on one row is a duplicate and is not valued twice.
-      const prior = valuedRows.get(primary.rowId);
-      if (prior && l.valued) {
-        const priorComp = compById.get(prior.componentId);
-        if (priorComp && sameWork(priorComp, comp)) {
-          l.valued = false; l.status = 'blocked'; l.statusNote = `Same work already valued for “${priorComp.name}” on this BOQ row. Not valued twice.`;
-          needs.push({ id: `dup-${comp.id}-${primary.rowId}`, kind: 'overlap', componentId: comp.id, title: `Overlap: ${l.item.ref}`, issue: `“${comp.name}” and “${priorComp.name}” describe the same work, action and location on this BOQ line. Pricing both would double count.`, evidence: [l.item.description], proposal: 'Value it once, or combine them explicitly if they are genuinely separate quantities.', options: [{ id: 'keep-first', label: `Keep it under “${priorComp.name}” only` }] });
+      if (l.valued) {
+        const prior = valuedRows.get(primary.rowId) ?? [];
+        const duplicate = prior.find((p) => sameWork(p, comp));
+        if (duplicate) {
+          l.valued = false; l.status = 'blocked'; l.statusNote = `Same work already valued for “${duplicate.name}” on this BOQ row. Not valued twice.`;
+          needs.push({ id: `dup-${comp.id}-${primary.rowId}`, kind: 'overlap', componentId: comp.id, title: `Overlap: ${l.item.ref}`, issue: `“${comp.name}” and “${duplicate.name}” describe the same work, action and location on this BOQ line. Pricing both would double count.`, evidence: [l.item.description], proposal: 'Value it once, or combine them explicitly if they are genuinely separate quantities.', options: [{ id: 'keep-first', label: `Keep it under “${duplicate.name}” only` }] });
         } else {
-          l.statusNote = `${l.statusNote ? `${l.statusNote} ` : ''}Shares BOQ row ${l.item.ref} with “${priorComp?.name ?? 'another change'}”. Each change keeps its own quantity and amount; combine them only if you choose to.`.trim();
+          if (prior.length) l.statusNote = `${l.statusNote ? `${l.statusNote} ` : ''}Shares BOQ row ${l.item.ref} with “${prior[0].name}”. Each change keeps its own quantity and amount; combine them only if you choose to.`.trim();
+          valuedRows.set(primary.rowId, [...prior, comp]);
         }
-      } else if (l.valued) valuedRows.set(primary.rowId, { componentId: comp.id });
+      }
       lines.push(l);
       for (const a of alternatives.filter((x) => x.rowId !== primary.rowId)) { const al = toLine(a, 'alternative'); al.valued = false; al.alternativesFor = l.item.ref; al.status = 'needs_input'; al.statusNote = 'Alternative candidate for the same component. Not valued.'; lines.push(al); }
     } else {
