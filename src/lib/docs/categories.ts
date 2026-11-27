@@ -1,3 +1,4 @@
+import { isProcessedPvrFile } from '@/lib/intake/processedReference';
 import type { FileRole } from '@/lib/intake/triage';
 
 /** User-facing categories. Each maps to the processing role used by triage, parsers and readiness. */
@@ -10,6 +11,7 @@ const CATEGORY_OPTIONS: CategoryOption[] = [
   { key: 'programme', label: 'Programme/XER', role: 'schedule' },
   { key: 'drawings', label: 'Drawings', role: 'drawings' },
   { key: 'contract', label: 'Contract/amendments', role: 'contract' },
+  { key: 'processed_pvr_reference', label: 'Processed PVR (comparison only)', role: 'reference' },
   { key: 'productivity', label: 'Productivity references', role: 'reference' },
   { key: 'correspondence', label: 'Correspondence', role: 'correspondence' },
   { key: 'site', label: 'Site reports', role: 'site' },
@@ -29,15 +31,16 @@ const PROGRAMME_SUBROLES = [
 ];
 
 /** Categories are stored as `<role>` plus a `categoryKey` in metadata so BOQ preambles and Productivity can be told apart. */
-function categoryKeyOf(role: string, metadata?: Record<string, string>): string {
+function categoryKeyOf(role: string, metadata?: Record<string, string>, fileName?: string): string {
   const k = metadata?.categoryKey;
   if (k && CATEGORY_OPTIONS.some((c) => c.key === k && c.role === role)) return k;
-  const first = CATEGORY_OPTIONS.find((c) => c.role === role);
+  if (role === 'reference' && fileName && isProcessedPvrFile(fileName)) return 'processed_pvr_reference';
+  const first = CATEGORY_OPTIONS.filter((c) => c.key !== 'processed_pvr_reference').find((c) => c.role === role);
   return first ? first.key : 'other';
 }
 
-function categoryLabel(role: string, metadata?: Record<string, string>): string {
-  const key = categoryKeyOf(role, metadata);
+function categoryLabel(role: string, metadata?: Record<string, string>, fileName?: string): string {
+  const key = categoryKeyOf(role, metadata, fileName);
   return CATEGORY_OPTIONS.find((c) => c.key === key)?.label ?? 'Other supporting documents';
 }
 

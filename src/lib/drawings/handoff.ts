@@ -1,3 +1,4 @@
+import { readSavedDrawingReplay, type SavedDrawingReplay } from './replay';
 import type { EvidenceDoc } from '@/lib/boq/scope';
 import type { AnalysisResult } from './types';
 import { fingerprintChanges } from './snapshot';
@@ -61,6 +62,8 @@ export interface ChangeHandoff {
   /** Answers applied so far, and the alternatives that were on offer when each was recorded. */
   appliedAnswers: { questionId: string; optionId: string; optionLabel: string; alternatives: string[] }[];
   limitations: string[];
+  /** A bounded display-only replay from the completed drawing comparison. */
+  drawingReplay?: SavedDrawingReplay;
 }
 
 export interface HandoffInputs {
@@ -166,6 +169,7 @@ export function normaliseHandoff(x: unknown): ChangeHandoff | null {
     openQuestions: Array.isArray(h.openQuestions) ? h.openQuestions : [],
     appliedAnswers: Array.isArray(h.appliedAnswers) ? h.appliedAnswers : [],
     limitations: Array.isArray(h.limitations) ? h.limitations : [],
+    drawingReplay: readSavedDrawingReplay(h.drawingReplay) ?? undefined,
   };
 }
 

@@ -3,6 +3,27 @@ import type { AnalysisQuestion, DrawingEntity, DrawingFile, DrawingPair, Measure
 
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
+/** Exclude explicit presentation layers, not physical layers merely containing a word such as "detail". */
+export function isPresentationLayer(layer: string): boolean {
+  const parts = layer.split(/[|$]/).map(norm);
+  return parts.some((p) => /(?:^| )(?:anno(?:tation)?s?|title ?block|viewport|legend|sheet border|drawing frame)(?: |$)/.test(p));
+}
+
+/** A typical detail documents configuration, not installation extents. Use the sheet title, not an incidental note. */
+export function isDetailOnlyTitle(rawTitle: string): boolean {
+  const title = norm(rawTitle);
+  return /\btypical (?:detail|details|section|sections|assembly|assemblies)\b|\b(?:front|side|sectional) (?:view|elevation)\b/.test(title)
+    && !/\b(?:alignment|chainage|layout(?: plan)?|site plan|location plan|setting out)\b/.test(title);
+}
+
+export function isDetailOnlyDrawing(file: DrawingFile): boolean {
+  return !!file.detailOnlyEvidence || isDetailOnlyTitle(file.titleBlock?.title ?? '');
+}
+
+function unboundedLimits(drawing: DrawingFile): string[] {
+  return (drawing.unboundedCoverageGaps ?? []).filter(({ layer }) => !isPresentationLayer(layer)).map(({ layer, reason }) => `${reason} on layer ${layer}`);
+}
+
 function titleSimilarity(a: string, b: string): number {
   const x = new Set(norm(a).split(' ').filter((w) => w.length > 2));
   const y = new Set(norm(b).split(' ').filter((w) => w.length > 2));
@@ -33,7 +54,7 @@ export function pairDrawings(files: DrawingFile[]): PairingOutcome {
   for (const f of usable) {
     const n = f.titleBlock?.drawingNumber ?? '';
     if (!n) { noNumber.push(f); continue; }
-    const key = n.toUpperCase();
+    const key = n.toUpperCase().replace(/_/g, '-');
     groups.set(key, [...(groups.get(key) ?? []), f]);
   }
 
@@ -85,6 +106,9 @@ export function validatePair(p: DrawingPair): DrawingPair {
   const blockers: string[] = [];
   const { original: o, revised: r } = p;
   for (const f of [o, r]) {
+    if (isDetailOnlyDrawing(f)) blockers.push(`${f.fileName}: typical detail/elevation layout shows configuration, not installed extent. Supply an alignment/layout or chainage schedule.`);
+    const gaps = unboundedLimits(f);
+    if (gaps.length) blockers.push(`${f.fileName}: coverage incomplete; ${gaps.slice(0, 5).join('; ')}${gaps.length > 5 ? ` and ${gaps.length - 5} more` : ''}. Bind or supply the referenced model geometry and re-export.`);
     if (f.metresPerUnit === null) blockers.push(`${f.fileName}: ${f.validationIssues.find((i) => /units/i.test(i)) ?? 'units are not established'}`);
   }
   if (o.metresPerUnit !== null && r.metresPerUnit !== null && o.metresPerUnit !== r.metresPerUnit) blockers.push(`The two drawings use different units (${o.unit} and ${r.unit}), so they are not directly comparable until the units are confirmed.`);
@@ -296,6 +320,63 @@ export function evidenceForObject(layer: string, extra: string[], sentences: Rel
 /** `relocationEvidence` is either a flag (legacy: applies to every pair) or a per-layer resolver (preferred). */
 export type RelocationInput = boolean | ((layer: string, pair: { from: DrawingEntity; to: DrawingEntity }) => RelocationEvidence | null);
 
+/** Lookup for the exact legacy size predicate, retaining original order for the first match.
+ * The range tree counts only active candidates (confirmed relocations consume an original). */
+class SizeRange {
+  private readonly offsets = new Map<number, number>();
+  private readonly size: number;
+  private readonly count: Int32Array;
+  private readonly first: Float64Array;
+  private readonly entries: { length: number; index: number }[];
+
+  constructor(entries: { length: number; index: number }[]) {
+    this.entries = entries;
+    entries.sort((a, b) => a.length - b.length || a.index - b.index);
+    this.size = 2 ** Math.ceil(Math.log2(entries.length));
+    this.count = new Int32Array(this.size * 2);
+    this.first = new Float64Array(this.size * 2).fill(Infinity);
+    entries.forEach(({index}, i) => {
+      const leaf = this.size + i;
+      this.offsets.set(index, leaf);
+      this.count[leaf] = 1;
+      this.first[leaf] = index;
+    });
+    for (let i = this.size - 1; i > 0; i -= 1) this.pull(i);
+  }
+
+  private pull(i: number) {
+    this.count[i] = this.count[2 * i] + this.count[2 * i + 1];
+    this.first[i] = Math.min(this.first[2 * i], this.first[2 * i + 1]);
+  }
+
+  remove(index: number) {
+    let i = this.offsets.get(index);
+    if (i === undefined) return;
+    this.count[i] = 0; this.first[i] = Infinity;
+    for (i = Math.floor(i / 2); i > 0; i = Math.floor(i / 2)) this.pull(i);
+  }
+
+  match(target: number, tolerance: number): { count: number; first: number } {
+    const boundary = (before: (value: number) => boolean) => {
+      let l = 0; let r = this.entries.length;
+      while (l < r) {
+        const mid = l + Math.floor((r - l) / 2);
+        if (before(this.entries[mid].length)) l = mid + 1; else r = mid;
+      }
+      return l;
+    };
+    // Subtract before comparing, as the original predicate does. Precomputed target ± tolerance can round differently.
+    let l = this.size + boundary((x) => x - target < -tolerance);
+    let r = this.size + boundary((x) => x - target <= tolerance);
+    let count = 0; let first = Infinity;
+    for (; l < r; l = Math.floor(l / 2), r = Math.floor(r / 2)) {
+      if (l % 2) { count += this.count[l]; first = Math.min(first, this.first[l]); l += 1; }
+      if (r % 2) { r -= 1; count += this.count[r]; first = Math.min(first, this.first[r]); }
+    }
+    return { count, first };
+  }
+}
+
 export interface DiffOptions {
   /** Metres to add to revised coordinates so they sit in the original's frame (origin shift). */
   shift?: { dx: number; dy: number } | null;
@@ -316,7 +397,10 @@ export function diffEntities(o: DrawingFile, r: DrawingFile, tolM = 0.01, reloca
   const out: EntityDiff[] = [];
   byLayer.forEach((g, layer) => {
     const remaining = new Map<string, DrawingEntity[]>();
-    for (const e of g.o) { const k = signature(e, mo, tolM); remaining.set(k, [...(remaining.get(k) ?? []), e]); }
+    for (const e of g.o) {
+      const k = signature(e, mo, tolM); const bucket = remaining.get(k);
+      if (bucket) bucket.push(e); else remaining.set(k, [e]);
+    }
     const added: DrawingEntity[] = [];
     for (const e of g.r) {
       const k = signature(e, mr, tolM, sx, sy);
@@ -324,25 +408,59 @@ export function diffEntities(o: DrawingFile, r: DrawingFile, tolM = 0.01, reloca
       if (bucket && bucket.length) bucket.pop(); else added.push(e);
     }
     const removed: DrawingEntity[] = [];
-    remaining.forEach((list) => removed.push(...list));
+    remaining.forEach((list) => { for (const e of list) removed.push(e); });
     const candidatePairs: EntityDiff['candidatePairs'] = [];
     const relocated: EntityDiff['relocated'] = [];
     const ambiguous: NonNullable<EntityDiff['ambiguous']> = [];
     let evidence: RelocationEvidence | null = null;
-    const sameSize = (x: DrawingEntity, a: DrawingEntity) => x.kind === a.kind && x.blockName === a.blockName && sizeOf(a) > 0 && Math.abs(sizeOf(x) * mo - sizeOf(a) * mr) <= 0.01 * Math.max(sizeOf(a) * mr, 1e-9);
-    for (const a of [...added]) {
-      const matches = removed.filter((x) => sameSize(x, a));
-      if (matches.length === 0) continue;
-      const i = removed.indexOf(matches[0]);
+    const consumed = new Set<number>();
+    const kept: DrawingEntity[] = [];
+    const keyFor = (e: DrawingEntity) => e.kind + '|' + (e.blockName === undefined ? '0' : '1' + e.blockName);
+    const sourceGroups = new Map<string, { length: number; index: number }[]>();
+    if (added.length) removed.forEach((e, index) => {
+      const length = sizeOf(e) * mo;
+      if (!Number.isFinite(length)) return;
+      const key = keyFor(e); const group = sourceGroups.get(key);
+      if (group) group.push({ length, index }); else sourceGroups.set(key, [{ length, index }]);
+    });
+    const ranges = new Map<string, SizeRange>();
+    for (const a of added) {
+      let n = 0; let i = Infinity; let range: SizeRange | undefined;
+      const target = sizeOf(a) * mr;
+      const tolerance = 0.01 * Math.max(target, 1e-9);
+      if (removed.length && sizeOf(a) > 0) {
+        const key = keyFor(a);
+        if (Number.isFinite(target)) {
+          const entries = sourceGroups.get(key);
+          if (entries) {
+            range = ranges.get(key);
+            if (!range) { range = new SizeRange(entries); ranges.set(key, range); }
+            ({ count: n, first: i } = range.match(target, tolerance));
+          }
+        } else {
+          // Preserve the existing predicate for invalid or unbounded numeric input as well.
+          removed.forEach((x, j) => {
+            if (!consumed.has(j) && x.kind === a.kind && x.blockName === a.blockName && Math.abs(sizeOf(x) * mo - target) <= tolerance) {
+              n += 1; i = Math.min(i, j);
+            }
+          });
+        }
+      }
+      // A prior non-finite lookup can consume a finite original. Keep the grouped index in sync even then.
+      if (n === 0) { kept.push(a); continue; }
       const pair = { from: removed[i], to: a };
-      // More than one equally plausible original for this addition: correspondence is not certain.
-      if (matches.length > 1) ambiguous.push({ added: 1, removed: matches.length, reason: `One added ${a.kind} could correspond to any of ${matches.length} removed elements of the same size on layer ${layer}.` });
+      if (n > 1) ambiguous.push({ added: 1, removed: n, reason: `One added ${a.kind} could correspond to any of ${n} removed elements of the same size on layer ${layer}.` });
       const ev = typeof relocationEvidence === 'function' ? relocationEvidence(layer, pair) : relocationEvidence ? ({ source: 'Narrative', sentence: '', matchedOn: [] } as RelocationEvidence) : null;
-      // Ambiguous correspondence is never auto-confirmed, even with evidence: a person must choose.
-      if (ev && matches.length === 1) { relocated.push(pair); removed.splice(i, 1); added.splice(added.indexOf(a), 1); evidence = evidence ?? ev; }
-      else candidatePairs.push(pair);
+      if (ev && n === 1) {
+        relocated.push(pair); consumed.add(i); evidence = evidence ?? ev;
+        const key = keyFor(removed[i]);
+        range = range ?? ranges.get(key);
+        if (!range && sourceGroups.has(key)) { range = new SizeRange(sourceGroups.get(key)!); ranges.set(key, range); }
+        range?.remove(i);
+      } else { candidatePairs.push(pair); kept.push(a); }
     }
-    if (added.length || removed.length || relocated.length) out.push({ layer, added, removed, relocated, candidatePairs, relocationEvidence: evidence, ambiguous });
+    const unmatched = consumed.size ? removed.filter((_, i) => !consumed.has(i)) : removed;
+    if (kept.length || unmatched.length || relocated.length) out.push({ layer, added: kept, removed: unmatched, relocated, candidatePairs, relocationEvidence: evidence, ambiguous });
   });
   return out.sort((a, b) => a.layer.localeCompare(b.layer));
 }
@@ -369,6 +487,17 @@ const refOf = (e: DrawingEntity): { handle: string; kind: string; layer: string;
 export function measurePair(pair: DrawingPair, tolerance = 0.01, relocationEvidence: RelocationInput = false): MeasureOutcome {
   const notes: string[] = [];
   if (!pair.validated) return { changes: [], notes: ['Pair is not validated, so nothing was measured.'] };
+  const detailFiles = [pair.original, pair.revised].filter(isDetailOnlyDrawing).map((f) => f.fileName);
+  if (detailFiles.length) return {
+    changes: [],
+    notes: [`Typical detail/elevation sheet(s) ${detailFiles.join(', ')} show configuration, not the installed extent. A corresponding plan/chainage drawing or a referenced quantity schedule is needed for a takeoff.`],
+  };
+  if ([pair.original, pair.revised].some((file) => unboundedLimits(file).length)) {
+    return { changes: [], notes: ['Placed unresolved references or unread block trees can contain geometry on other layers. No exact takeoff was issued.'] };
+  }
+  if (!pair.original.metresPerUnit || !pair.revised.metresPerUnit) {
+    return {changes: [], notes: ['Both drawing units must be established before measuring.']};
+  }
   const mpuO = pair.original.metresPerUnit ?? 1; const mpuR = pair.revised.metresPerUnit ?? 1;
   const a = totals(pair.original); const b = totals(pair.revised);
   const shift = pair.originShift ? { dx: pair.originShift.dx, dy: pair.originShift.dy } : null;
@@ -377,6 +506,17 @@ export function measurePair(pair: DrawingPair, tolerance = 0.01, relocationEvide
   const changes: MeasuredChange[] = [];
   const srcOf = (f: DrawingFile, layer: string) => `${f.fileName} · layer ${layer}`;
   for (const d of diffs) {
+    if (isPresentationLayer(d.layer)) {
+      notes.push(`Layer ${d.layer}: annotation/frame/legend geometry was excluded from quantities.`);
+      continue;
+    }
+    const limited = [pair.original, pair.revised].flatMap((f) =>
+      Object.entries(f.coverageGapsByLayer ?? {}).filter(([layer]) => layer.toLowerCase() === d.layer.toLowerCase())
+        .map(([, kinds]) => `${f.fileName} (${kinds.join(', ')})`));
+    if (limited.length) {
+      if (d.added.length || d.removed.length || d.relocated.length) notes.push(`Coverage incomplete on layer ${d.layer}: unread geometry in ${limited.join('; ')}. The layer was withheld from the takeoff.`);
+      continue;
+    }
     const ta = a.get(d.layer); const tb = b.get(d.layer);
     const kind = kindFor(tb ?? ta!) ?? kindFor(ta ?? tb!);
     if (!kind) { notes.push(`Layer ${d.layer}: no measurable geometry.`); continue; }

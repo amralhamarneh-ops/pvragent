@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { extractByExtension, MAX_BYTES } from '@/lib/drawings/extractServer';
+import { extractByExtension, MAX_BYTES, ocrLanguageOptions, scanRasterizerReady } from '@/lib/drawings/extractServer';
 import { convertDwg, dwgStatus } from '@/lib/drawings/dwgConvert';
 import { validateUpload, workerConfig, submitJob, getJob, cancelJob } from '@/lib/drawings/processingAdapter';
 import { verifyUser } from '@/lib/boq/supabaseStore';
@@ -11,10 +11,11 @@ export const maxDuration = 300;
 export async function GET() {
   const dwg = dwgStatus();
   const c = workerConfig();
-  let canvas = false;
-  try { await import('@napi-rs/canvas'); canvas = true; } catch { canvas = false; }
+  let ocr = false;
+  try { ocrLanguageOptions(); ocr = true; } catch { /* no packaged or configured language data */ }
+  const rasterizer = !c.remote && ocr && await scanRasterizerReady();
   return NextResponse.json({
-    pdfText: true, docx: true, ocrImages: true, ocrScannedPdf: canvas,
+    pdfText: true, docx: true, ocrImages: c.remote || ocr, ocrScannedPdf: c.remote || rasterizer,
     processing: c.remote ? 'remote_worker' : 'in_process',
     dwg: c.remote ? { configured: true, converter: 'remote worker (verify with the Processing Tools test)' } : dwg.configured ? { configured: true, converter: dwg.converter } : { configured: false, reason: dwg.reason, requirement: dwg.requirement },
   });
@@ -28,7 +29,8 @@ export async function GET() {
  */
 export async function POST(req: NextRequest) {
   // Same identity rules as the case API; refuses requests when the server is not configured.
-  try { await verifyUser(req.headers.get('authorization'), process.env.NEXT_PUBLIC_SUPABASE_URL, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY); }
+  let user: Awaited<ReturnType<typeof verifyUser>>;
+  try { user = await verifyUser(req.headers.get('authorization'), process.env.NEXT_PUBLIC_SUPABASE_URL, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY); }
   catch { return NextResponse.json({ error: 'The server is not configured to authorise this request.' }, { status: 503 }); }
   let form: FormData;
   try { form = await req.formData(); } catch { return NextResponse.json({ error: 'Expected multipart form data.' }, { status: 400 }); }
@@ -39,7 +41,7 @@ export async function POST(req: NextRequest) {
   const bytes = new Uint8Array(await file.arrayBuffer());
   const ext = (name.match(/\.([a-z0-9]+)$/i) ?? [])[1]?.toLowerCase() ?? '';
   const bad = validateUpload(name, bytes);
-  if (bad && !(ext !== 'dwg' && !['pdf', 'docx', 'png', 'jpg', 'jpeg'].includes(ext))) return NextResponse.json({ error: bad }, { status: 415 });
+  if (bad && ["dwg", "pdf", "docx", "png", "jpg", "jpeg"].includes(ext)) return NextResponse.json({ error: bad }, { status: 415 });
   const caseId = String(form.get('caseId') ?? 'adhoc'); const runId = String(form.get('runId') ?? crypto.randomUUID());
   const enc = new TextEncoder();
   const aborted = () => req.signal.aborted;
@@ -48,7 +50,7 @@ export async function POST(req: NextRequest) {
       const send = (o: unknown) => { try { controller.enqueue(enc.encode(`${JSON.stringify(o)}\n`)); } catch { /* client gone */ } };
       try {
         if (workerConfig().remote) {
-          const job = await submitJob({ caseId, runId, fileName: name, bytes, userId: 'stream' });
+          const job = await submitJob({ caseId, runId, fileName: name, bytes, userId: user.id });
           send({ type: 'progress', detail: `Submitted to the processing worker (job ${job.id.slice(0, 8)})` });
           for (;;) {
             if (aborted()) { await cancelJob(job.id); send({ type: 'result', ok: false, error: 'Cancelled.' }); break; }

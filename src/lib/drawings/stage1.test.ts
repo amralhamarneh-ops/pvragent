@@ -232,6 +232,16 @@ describe('XER programmes are parsed from real files', () => {
     expect(out.schedules[0].model.activities.map((a) => a.id)).toEqual(['A100', 'A110']);
     expect(out.files[0].stateLabel).toBe('Read successfully');
   });
+  it('reports legacy XER names and rejects incomplete uploads at the analysis entry point', async () => {
+    const complete = 'ERMHDR\t8.0\r%T\tTASK\r%F\ttask_id\ttask_code\ttask_name\r%R\t1\tA\tCafé\r%E\r';
+    const asLegacy = (content: string) => Uint8Array.from([...content].map(c=>c.charCodeAt(0)));
+    const out = await analyseDocuments({ files: [
+      { name: 'legacy.xer', role: 'schedule', bytes: asLegacy(complete) },
+      { name: 'truncated.xer', role: 'schedule', bytes: asLegacy(complete.replace('%E','')) },
+    ], narrative: '' });
+    expect(out.schedules.map(s=>s.model.activities[0].name)).toEqual(['Café']);
+    expect(out.files.find(f=>f.fileName==='truncated.xer')?.detail).toMatch(/end marker/);
+  });
 });
 
 describe('DOCX and PDF extraction with real files', () => {

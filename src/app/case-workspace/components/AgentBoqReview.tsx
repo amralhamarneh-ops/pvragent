@@ -50,7 +50,7 @@ export default function AgentBoqReview(p: AgentBoqReviewProps) {
   const canAnalyse = p.hasBoq && (p.narrative.trim().length > 0 || p.evidence.some((e) => e.extracted)) && !p.running;
   const manualLine = outcome && manualFor ? outcome.lines.find((l) => l.componentId === manualFor && l.role === 'primary') ?? null : null;
   const manualComp = p.run && manualFor ? p.run.scope.components.find((c) => c.id === manualFor) ?? null : null;
-  const manualQty = manualFor ? (p.answers.quantity[manualFor] ?? manualComp?.quantity ?? null) : null;
+  const manualQty = manualFor ? ((p.run?.drawingQuantitiesOnly ? null : p.answers.quantity[manualFor]) ?? manualComp?.quantity ?? null) : null;
   const excludeComp = p.run && excludeFor ? p.run.scope.components.find((c) => c.id === excludeFor) ?? null : null;
   const deferComp = p.run && deferFor ? p.run.scope.components.find((c) => c.id === deferFor) ?? null : null;
   const deferredRows = p.run
@@ -96,7 +96,7 @@ export default function AgentBoqReview(p: AgentBoqReviewProps) {
             ))}
           </ul>
         ) : null}
-        {!p.hasBoq ? <p className="mt-3 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-foreground">Import a BOQ first. The agent only uses rates from your uploaded BOQ files.</p> : null}
+        {!p.hasBoq ? <p className="mt-3 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-foreground">Import a BOQ first. The agent prioritizes your uploaded BOQ rates. After review, a missing rate can use a cited processed PVR rate for a pilot only.</p> : null}
         <div className="mt-4 flex flex-wrap items-center gap-3">
           {!p.run || p.stale ? (
             <button type="button" onClick={p.onAnalyse} disabled={!canAnalyse} className="inline-flex items-center gap-2 rounded-md bg-primary px-5 py-2.5 font-semibold text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground">
@@ -173,7 +173,7 @@ export default function AgentBoqReview(p: AgentBoqReviewProps) {
                             <td className="px-2 py-2 text-right tabular text-foreground">{l.quantityText}<span className="block text-xs text-muted-foreground">{l.quantityOrigin}</span></td>
                             <td className="px-2 py-2 text-right tabular text-foreground">{l.item.rate.state === 'value' ? l.item.rate.value : <span className="text-warning">{l.item.rate.state === 'missing' ? 'No rate' : 'Invalid'}</span>}</td>
                             <td className="px-2 py-2 text-right tabular font-semibold text-foreground">{l.manual && l.valued ? formatSigned(l.manual.amountSigned, l.manual.rate.currency) : ok && l.valued ? formatSigned(ok.signedAmount, ok.currency) : '—'}</td>
-                            <td className="px-2 py-2"><span className={`whitespace-nowrap rounded px-2 py-0.5 text-xs font-medium ${STATUS_TONE[l.status]}`}>{l.excluded ? (l.excluded.scope === 'cost_only' ? 'Cost excluded' : 'Excluded') : l.deferred ? 'Deferred' : l.manual ? 'Manual rate · Proposed' : l.leftUnresolved ? 'Unresolved' : l.valued ? STATUS_LABEL[l.status] : 'Not valued'}</span></td>
+                            <td className="px-2 py-2"><span className={`whitespace-nowrap rounded px-2 py-0.5 text-xs font-medium ${STATUS_TONE[l.status]}`}>{l.excluded ? (l.excluded.scope === 'cost_only' ? 'Cost excluded' : 'Excluded') : l.deferred ? 'Deferred' : l.manual ? (l.manual.rate.processedPvr ? 'Processed PVR · Pilot' : 'Manual rate · Proposed') : l.leftUnresolved ? 'Unresolved' : l.valued ? STATUS_LABEL[l.status] : 'Not valued'}</span></td>
                           </tr>
                           {isOpen ? (
                             <tr className="border-t border-border bg-background">
@@ -184,13 +184,13 @@ export default function AgentBoqReview(p: AgentBoqReviewProps) {
                                   <div><p className="font-semibold text-foreground">Source references</p><p className="font-data text-muted-foreground">{l.item.sourceFile} · {l.item.sheet}!{l.item.rowNumber}{l.item.rate.cell ? ` · rate ${l.item.rate.cell}` : ''}{l.item.cells.ref ? ` · ref ${l.item.cells.ref}` : ''}</p>{l.section ? <p className="text-muted-foreground">Section: {l.section}</p> : null}{l.preambleNote ? <p className="mt-1 text-muted-foreground">{l.preambleNote}</p> : null}</div>
                                   <div className="md:col-span-2"><p className="font-semibold text-foreground">Quantity derivation</p>{ok ? <><p className="font-data text-muted-foreground">{ok.conversion.derivation}</p><p className="font-data text-muted-foreground">{ok.formula}</p></> : <p className="text-muted-foreground">{l.statusNote || 'Not calculated.'}</p>}<p className="text-xs text-muted-foreground">{l.quantityOrigin}{l.quantitySource ? ` · ${l.quantitySource}` : ''}</p></div>
                                 </div>
-                                <div className="mt-2 flex flex-wrap gap-2">
+                                {!p.run?.drawingQuantitiesOnly && <div className="mt-2 flex flex-wrap gap-2">
                                   <button type="button" onClick={() => setEditing(editing === l.key ? null : l.key)} className="rounded-md border border-input bg-card px-2.5 py-1 text-xs font-medium hover:bg-muted">Edit quantity</button>
-                                </div>
+                                </div>}
                                 {l.role === 'primary' && !l.excluded && !l.deferred ? <ResolutionButtons line={l} run={p.run!} onChooseRow={(rowId) => { p.onResolve(l.componentId, undefined); set({ chosenRow: { ...p.answers.chosenRow, [l.componentId]: rowId } }); }} onManual={() => setManualFor(l.componentId)} onExclude={() => setExcludeFor(l.componentId)} onDefer={() => setDeferFor(l.componentId)} onUnresolved={() => p.onResolve(l.componentId, { kind: 'unresolved', at: new Date().toISOString() })} /> : null}
-                                {l.manual ? <p className="mt-2 text-xs text-muted-foreground">Manual rate · Proposed — {l.manual.rate.currency} {l.manual.rate.value}/{l.manual.rate.unit} · {l.manual.rate.reason} · entered by {l.manual.rate.enteredBy} on {l.manual.rate.enteredAt.slice(0, 16).replace('T', ' ')}{l.manual.rate.reference ? ` · ref ${l.manual.rate.reference}` : ''}. Not commercially approved.</p> : null}
+                                {l.manual ? <p className="mt-2 text-xs text-muted-foreground">{l.manual.rate.processedPvr ? `Processed PVR · Pilot — ${l.manual.rate.processedPvr.file}, page ${l.manual.rate.processedPvr.page}, ${l.manual.rate.processedPvr.row} —` : 'Manual rate · Proposed —'} {l.manual.rate.currency} {l.manual.rate.value}/{l.manual.rate.unit} · {l.manual.rate.reason} · entered by {l.manual.rate.enteredBy} on {l.manual.rate.enteredAt.slice(0, 16).replace('T', ' ')}{l.manual.rate.reference ? ` · ref ${l.manual.rate.reference}` : ''}. Not commercially approved.</p> : null}
                                 {l.manual ? <button type="button" onClick={() => p.onResolve(l.componentId, undefined)} className="mt-1 text-xs text-accent hover:underline">Remove manual rate</button> : null}
-                                {editing === l.key ? <QuantityEditor componentId={l.componentId} line={l} answers={p.answers} onChange={set} /> : null}
+                                {!p.run?.drawingQuantitiesOnly && editing === l.key ? <QuantityEditor componentId={l.componentId} line={l} answers={p.answers} onChange={set} /> : null}
                               </td>
                             </tr>
                           ) : null}
@@ -206,7 +206,7 @@ export default function AgentBoqReview(p: AgentBoqReviewProps) {
                 <p className="font-semibold text-foreground">New item / rate required</p>
                 <ul className="list-disc pl-5 text-muted-foreground">{outcome.unmatched.map((u) => <li key={u.componentId}><span className="text-foreground">{u.name}</span> — {u.reason}
                   <span className="ml-2 inline-flex flex-wrap gap-2 align-middle">
-                    <button type="button" onClick={() => setManualFor(u.componentId)} className="rounded-md border border-input bg-card px-2 py-0.5 text-xs font-medium text-foreground hover:bg-muted">Enter manual rate</button>
+                    <button type="button" onClick={() => setManualFor(u.componentId)} className="rounded-md border border-input bg-card px-2 py-0.5 text-xs font-medium text-foreground hover:bg-muted">{p.run?.drawingQuantitiesOnly?'Cite processed PVR rate':'Enter manual rate'}</button>
                     <button type="button" onClick={() => setExcludeFor(u.componentId)} className="rounded-md border border-input bg-card px-2 py-0.5 text-xs font-medium text-foreground hover:bg-muted">Exclude from this assessment</button>
                   </span></li>)}</ul>
               </div>
@@ -226,7 +226,7 @@ export default function AgentBoqReview(p: AgentBoqReviewProps) {
                 </ul>
               </div>
             ) : null}
-            <ManualRateModal key={`mr-${manualFor ?? 'none'}`} open={!!manualFor} line={manualLine ?? (manualComp ? ({ componentName: manualComp.name } as RelatedLine) : null)} currency={outcome.currency || 'AED'} quantity={manualQty ? { value: manualQty.value, unit: manualQty.unit } : null} direction={manualComp?.action === 'omit' ? 'omission' : 'addition'} existing={manualFor && p.answers.resolutions?.[manualFor]?.kind === 'manual_rate' ? (p.answers.resolutions[manualFor] as Extract<LineResolution, { kind: 'manual_rate' }>).manual : undefined} onClose={() => setManualFor(null)} onSave={(m) => { if (manualFor) p.onResolve(manualFor, { kind: 'manual_rate', manual: m }); setManualFor(null); }} />
+            <ManualRateModal key={`mr-${manualFor ?? 'none'}`} open={!!manualFor} processedOnly={!!p.run?.drawingQuantitiesOnly} line={manualLine ?? (manualComp ? ({ componentName: manualComp.name } as RelatedLine) : null)} currency={outcome.currency || 'AED'} quantity={manualQty ? { value: manualQty.value, unit: manualQty.unit } : null} scope={manualComp} direction={manualComp?.action === 'omit' ? 'omission' : 'addition'} existing={manualFor && p.answers.resolutions?.[manualFor]?.kind === 'manual_rate' ? (p.answers.resolutions[manualFor] as Extract<LineResolution, { kind: 'manual_rate' }>).manual : undefined} onClose={() => setManualFor(null)} onSave={(m) => { if (manualFor) p.onResolve(manualFor, { kind: 'manual_rate', manual: m }); setManualFor(null); }} />
             <ExcludeModal key={`ex-${excludeFor ?? 'none'}`} open={!!excludeFor} line={excludeComp ? { componentName: excludeComp.name } : null} onClose={() => setExcludeFor(null)} onSave={(r) => { if (excludeFor) p.onResolve(excludeFor, r); setExcludeFor(null); }} />
             <DeferModal key={`df-${deferFor ?? 'none'}`} open={!!deferFor} line={deferComp ? { componentName: deferComp.name } : null} onClose={() => setDeferFor(null)} onSave={(r) => { if (deferFor) p.onResolve(deferFor, r); setDeferFor(null); }} />
             {outcome.rejectedModelRefs.length > 0 ? <p className="mt-2 text-xs text-muted-foreground">{outcome.rejectedModelRefs.length} model reference(s) were discarded because they were not in the uploaded BOQ set or the retrieved candidates.</p> : null}
@@ -281,7 +281,7 @@ function NeedCard({ need, run, answers, onChange }: { need: NeedsInput; run: Age
       {need.evidence.length > 0 ? <ul className="mt-1 list-disc pl-5 text-xs text-muted-foreground">{need.evidence.slice(0, 4).map((e) => <li key={e}>{e}</li>)}</ul> : null}
       <p className="mt-1 text-sm text-muted-foreground">Proposed: {need.proposal}</p>
 
-      {need.kind === 'missing_dimension' && plan && plan.kind === 'needs_derivation' && need.componentId ? (
+      {!run.drawingQuantitiesOnly && need.kind === 'missing_dimension' && plan && plan.kind === 'needs_derivation' && need.componentId ? (
         <div className="mt-2 rounded-md border border-border bg-card p-3">
           <div className="flex flex-wrap gap-3">
             {plan.required.map((name) => (
@@ -294,7 +294,9 @@ function NeedCard({ need, run, answers, onChange }: { need: NeedsInput; run: Age
         </div>
       ) : null}
 
-      {need.kind === 'missing_quantity' && need.componentId ? (
+      {run.drawingQuantitiesOnly && (need.kind === 'missing_quantity' || need.kind === 'missing_dimension') ?
+        <p className="mt-2 text-sm font-medium">Supply matching original and revised drawings with verified units, and rerun the takeoff. Review entries and benchmark quantities cannot price this line.</p> : null}
+      {!run.drawingQuantitiesOnly && need.kind === 'missing_quantity' && need.componentId ? (
         <div className="mt-2 flex flex-wrap items-end gap-2">
           <div><label className="text-xs text-muted-foreground" htmlFor={`${need.id}-q`}>Quantity</label><input id={`${need.id}-q`} inputMode="decimal" value={qty.value} onChange={(e) => setQty({ ...qty, value: e.target.value })} className="mt-0.5 block w-28 rounded-md border border-input bg-card px-2 py-1 text-right tabular text-foreground" /></div>
           <div><label className="text-xs text-muted-foreground" htmlFor={`${need.id}-u`}>Unit</label><input id={`${need.id}-u`} value={qty.unit} onChange={(e) => setQty({ ...qty, unit: e.target.value })} className="mt-0.5 block w-20 rounded-md border border-input bg-card px-2 py-1 text-foreground" /></div>

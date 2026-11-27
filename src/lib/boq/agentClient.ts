@@ -1,8 +1,11 @@
+import { isProcessedPvrFile } from '../intake/processedReference';
 import { getAccessToken } from '@/lib/supabase/client';
 import { assemble, buildBoqSet, briefFor, shortlistForScope, type AssessmentOutcome, type BoqSet, type UserAnswers, EMPTY_ANSWERS } from './matchEngine';
 import type { BoqImport } from './types';
 import type { ChangeScope, EvidenceDoc, ModelMatchResult } from './scope';
 import type { RetrievedCandidate } from './retrieve';
+import { withDrawingQuantities, type DrawingDocument } from './drawingQuantities';
+import type { ChangeHandoff } from '../drawings/handoff';
 
 /** One real processing event. Only things that actually happened are recorded. */
 export interface AgentEvent { at: string; step: string; detail: string; ms?: number }
@@ -16,6 +19,7 @@ export interface AgentRun {
   problems: string[];
   cached: { scope: boolean; match: boolean };
   importSignature: string;
+  drawingQuantitiesOnly?: boolean;
 }
 
 const TEXT_EXT = /\.(txt|md|csv|json|eml|log)$/i;
@@ -58,7 +62,7 @@ export function importSignatureOf(imports: BoqImport[]): string {
  * Run the real workflow: understand the change -> retrieve candidates from the whole active BOQ set -> ask the model
  * to relate components to those candidates. Throws an Error with the exact reason when a step cannot run.
  */
-export async function runAgent(args: { imports: BoqImport[]; narrative: string; evidence: EvidenceDoc[]; onEvent?: (e: AgentEvent) => void }): Promise<AgentRun> {
+export async function runAgent(args: { imports: BoqImport[]; narrative: string; evidence: EvidenceDoc[]; drawingQuantityHandoff?: ChangeHandoff | null; activeDrawingDocuments?: readonly DrawingDocument[]; onEvent?: (e: AgentEvent) => void }): Promise<AgentRun> {
   const events: AgentEvent[] = [];
   const push = (step: string, detail: string, started?: number) => { const e: AgentEvent = { at: new Date().toISOString(), step, detail, ms: started ? Math.round(performance.now() - started) : undefined }; events.push(e); args.onEvent?.(e); };
 
@@ -67,32 +71,40 @@ export async function runAgent(args: { imports: BoqImport[]; narrative: string; 
   if (set.items.length === 0) throw new Error('The active BOQ set has no items. Import and confirm a BOQ first.');
   push('Read BOQ set', `${set.files.length} file(s), ${set.items.length} item(s), ${set.files.reduce((n, f) => n + f.unpriced, 0)} without a rate. ${set.files.map((f) => `${f.fileName} (revision ${f.revision})`).join('; ')}.`, t);
 
-  const readable = args.evidence.filter((e) => e.extracted).length;
-  const unread = args.evidence.filter((e) => !e.extracted);
+  const drawingQuantitiesOnly = args.drawingQuantityHandoff !== undefined;
+  const referenceNames = new Set(args.drawingQuantityHandoff?.documents.filter((d) => d.role === 'reference' || d.role === 'unused').flatMap((d) => [d.name, d.name.split(/[\\/]/).at(-1)]) ?? []);
+  const evidence = drawingQuantitiesOnly ? args.evidence.filter((e) => e.name !== 'Automatic change analysis' && !referenceNames.has(e.name) && !isProcessedPvrFile(e.name)) : args.evidence;
+  const readable = evidence.filter((e) => e.extracted).length;
+  const unread = evidence.filter((e) => !e.extracted);
   push('Read change evidence', `${readable} readable document(s), narrative ${args.narrative.trim().length} characters.${unread.length ? ` Not readable: ${unread.map((u) => u.name).join(', ')}.` : ''}`);
 
   t = performance.now();
-  const sc = await authedPost<{ scope: ChangeScope; problems: string[]; cached: boolean; events: AgentEvent[] }>({ phase: 'scope', narrative: args.narrative, evidence: args.evidence });
+  const sc = await authedPost<{ scope: ChangeScope; problems: string[]; cached: boolean; events: AgentEvent[] }>({ phase: 'scope', narrative: args.narrative, evidence });
   if (!sc.ok) { push('Understand change', `Failed: ${sc.error}`, t); throw new Error(sc.error); }
   sc.data.events?.forEach((e) => push(e.step, e.detail));
   push('Understand change', `${sc.data.scope.components.length} component(s) identified${sc.data.cached ? ' (cached result reused)' : ''}.${sc.data.problems.length ? ` ${sc.data.problems.length} model claim(s) corrected: ${sc.data.problems.join(' ')}` : ''}`, t);
 
+  const scope = drawingQuantitiesOnly ? withDrawingQuantities(sc.data.scope, args.drawingQuantityHandoff ?? null, args.activeDrawingDocuments ?? []) : sc.data.scope;
+  if (drawingQuantitiesOnly) push('Verify drawing quantities', `${scope.components.filter((c) => c.quantity !== null).length} drawing-measured scope line(s) available; reference, model and user-entered quantities are not valued.`);
+
   t = performance.now();
-  const shortlist = shortlistForScope(set, sc.data.scope);
-  push('Search BOQ set', sc.data.scope.components.map((c) => `${c.name}: ${shortlist[c.id]?.length ?? 0} candidate(s)`).join('; '), t);
+  const shortlist = shortlistForScope(set, scope);
+  push('Search BOQ set', scope.components.map((c) => `${c.name}: ${shortlist[c.id]?.length ?? 0} candidate(s)`).join('; '), t);
 
   const candidates: Record<string, ReturnType<typeof briefFor>[]> = {};
-  for (const c of sc.data.scope.components) candidates[c.id] = (shortlist[c.id] ?? []).map((r) => briefFor(r.item, set.context));
+  for (const c of scope.components) candidates[c.id] = (shortlist[c.id] ?? []).map((r) => briefFor(r.item, set.context));
 
   t = performance.now();
-  const mt = await authedPost<{ match: ModelMatchResult; problems: string[]; cached: boolean; events: AgentEvent[] }>({ phase: 'match', scope: sc.data.scope, candidates });
+  const mt = await authedPost<{ match: ModelMatchResult; problems: string[]; cached: boolean; events: AgentEvent[] }>({ phase: 'match', scope, candidates });
   if (!mt.ok) { push('Relate to BOQ items', `Failed: ${mt.error}`, t); throw new Error(mt.error); }
   mt.data.events?.forEach((e) => push(e.step, e.detail));
   push('Relate to BOQ items', `${mt.data.match.lines.length} line(s) proposed${mt.data.cached ? ' (cached result reused)' : ''}.${mt.data.problems.length ? ` ${mt.data.problems.length} reference(s) discarded: ${mt.data.problems.join(' ')}` : ''}`, t);
 
-  return { scope: sc.data.scope, proposal: mt.data.match, shortlist, set, events, problems: [...sc.data.problems, ...mt.data.problems], cached: { scope: sc.data.cached, match: mt.data.cached }, importSignature: importSignatureOf(args.imports) };
+  return { scope, drawingQuantitiesOnly, proposal: mt.data.match, shortlist, set, events, problems: [...sc.data.problems, ...mt.data.problems], cached: { scope: sc.data.cached, match: mt.data.cached }, importSignature: importSignatureOf(args.imports) };
 }
 
 export function outcomeOf(run: AgentRun, answers: UserAnswers = EMPTY_ANSWERS): AssessmentOutcome {
-  return assemble(run.set, run.scope, run.proposal, run.shortlist, answers);
+  const resolutions = run.drawingQuantitiesOnly ? Object.fromEntries(Object.entries(answers.resolutions ?? {})
+    .filter(([,r])=>r.kind!=='manual_rate' || !!r.manual.processedPvr)) : answers.resolutions;
+  return assemble(run.set, run.scope, run.proposal, run.shortlist, run.drawingQuantitiesOnly ? { ...answers, resolutions, quantity: {}, derivation: {} } : answers);
 }

@@ -9,13 +9,13 @@ import DocumentsStep from '@/app/new-pvr/components/DocumentsStep';
 import EvidencePack from '@/app/new-pvr/components/EvidencePack';
 import TriageStep, { type ProjectChoice } from '@/app/new-pvr/components/TriageStep';
 import PrerequisitesStep from '@/app/new-pvr/components/PrerequisitesStep';
-import { analyseDocuments, type InputFile } from '@/lib/drawings/analyse';
+import { buildSavedDrawingReplay } from '@/lib/drawings/replay';
+import { AnalysisReadCache, analyseDocuments, type AnalysisOutput, type InputFile } from '@/lib/drawings/analyse';
 import DrawingAnalysisPanel, { type PanelDoc } from '@/app/case-workspace/components/DrawingAnalysisPanel';
 import BackgroundJobPanel from '@/app/case-workspace/components/BackgroundJobPanel';
 import { serverExtractor } from '@/lib/drawings/extractClient';
 import { buildHandoff, saveHandoff } from '@/lib/drawings/handoff';
 import { nextVersion } from '@/lib/drawings/snapshot';
-import type { AnalysisResult } from '@/lib/drawings/types';
 import EvidenceDrawer from '@/components/EvidenceDrawer';
 import Modal from '@/components/ui/Modal';
 import JourneyStepper from '@/components/JourneyStepper';
@@ -26,6 +26,7 @@ import { buildCoverage } from '@/lib/boq/coverage';
 import { importSignatureOf } from '@/lib/boq/agentClient';
 import { readRunRecord } from '@/lib/boq/runRecord';
 import RequireSignIn from '@/components/RequireSignIn';
+import { isProcessedPvrFile } from '@/lib/intake/processedReference';
 import { classifyOne, demoPack, type ClassifiedFile, type FileRole, type IncomingFile, type TriageResult } from '@/lib/intake/triage';
 import { computeReadiness, primaryAction } from '@/lib/intake/readiness';
 import type { DocGroup } from '@/lib/intake/docGroups';
@@ -97,7 +98,7 @@ export default function NewPvrFlow() {
   const [project, setProject] = useState<ProjectChoice | null>(null);
   const [separate, setSeparate] = useState(true);
   const [skipped, setSkipped] = useState<string[]>([]);
-  const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
+  const [analysis, setAnalysis] = useState<AnalysisOutput | null>(null);
   const [analysing, setAnalysing] = useState(false);
   const [analysisError, setAnalysisError] = useState('');
   const [qAnswers, setQAnswers] = useState<Record<string, string>>({});
@@ -108,6 +109,7 @@ export default function NewPvrFlow() {
   const [manualDate, setManualDate] = useState('');
   /** One shared registry for every upload path. Bytes live here (and in IndexedDB / authorised storage), never in a loose ref. */
   const registry = useRef<DocumentRegistry>(new DocumentRegistry());
+  const reads = useRef(new AnalysisReadCache());
   const [registryVersion, setRegistryVersion] = useState(0);
   const bump = useCallback(() => setRegistryVersion((v) => v + 1), []);
   const [missingBytes, setMissingBytes] = useState<Set<string>>(new Set());
@@ -115,7 +117,7 @@ export default function NewPvrFlow() {
   const [docMessage, setDocMessage] = useState('');
   const [lastExtracted, setLastExtracted] = useState<{ name: string; text: string }[]>([]);
   const [lastExtractedState, setLastExtractedState] = useState(0);
-  const analysisRef = useRef<AnalysisResult | null>(null);
+  const analysisRef = useRef<AnalysisOutput | null>(null);
   const lastExtractedRef = useRef<{ name: string; text: string }[]>([]);
   useEffect(() => { analysisRef.current = analysis; }, [analysis]);
   useEffect(() => { lastExtractedRef.current = lastExtracted; setLastExtractedState((n) => n + 1); }, [lastExtracted]);
@@ -151,6 +153,7 @@ export default function NewPvrFlow() {
     setActiveScope(id);
     const d = draft ?? emptyDraft(id);
     registry.current.clear();
+    reads.current = new AnalysisReadCache();
     setIncoming(d.files);
     setRoleOverride(d.roleOverride as Record<string, FileRole>);
     roleOverrideRef.current = d.roleOverride as Record<string, FileRole>;
@@ -273,6 +276,7 @@ export default function NewPvrFlow() {
     setSelectedDocs(new Set());
     setStaleReason('');
     registry.current.clear();
+    reads.current = new AnalysisReadCache();
     setMissingBytes(new Set());
     if (narrative.trim().length === 0) setNarrative('Extend access road R4 from 5.0 km to 7.0 km, including pavement, kerbs and lighting.');
   };
@@ -359,6 +363,7 @@ export default function NewPvrFlow() {
       }
       epochRef.current += 1;
       registry.current.clear();
+      reads.current = new AnalysisReadCache();
       setIncoming([]);
       setRoleOverride({}); roleOverrideRef.current = {};
       setSubroles({});
@@ -550,7 +555,7 @@ export default function NewPvrFlow() {
         id: d.id, path: d.path, name: d.name, role: d.role, subrole: d.subrole ?? '', metadata: d.metadata ?? {}, roleManual: !!d.roleManual,
         hasBytes: !missingBytes.has(d.path) && registry.current.hasBytes(d.path), stateLabel: DOC_STATE_LABEL[d.state], stateDetail: d.stateDetail,
         stateTone: STATE_TONE[d.state] ?? STATE_TONE.uploaded, version: d.version, size: d.size, sha256: d.sha256,
-        categoryLabel: categoryLabel(d.role, d.metadata), subroleLabel: subroleLabel(d.role, d.subrole),
+        categoryLabel: categoryLabel(d.role, d.metadata, d.path), subroleLabel: subroleLabel(d.role, d.subrole),
       });
     }
     return out;
@@ -559,11 +564,11 @@ export default function NewPvrFlow() {
   }, [incoming, missingBytes, registryVersion]);
 
   /** Documents handed to the drawing analysis panel: the same registry rows, with their real bytes. */
-    const panelDocs: PanelDoc[] = useMemo(() => managedDocs.map((d) => ({ id: d.id, name: d.path, sha256: d.sha256, role: d.role, bytes: registry.current.bytesOf(d.id) })), [managedDocs]); // eslint-disable-line react-hooks/exhaustive-deps
+    const panelDocs: PanelDoc[] = useMemo(() => managedDocs.filter((d) => d.role !== 'reference' && !isProcessedPvrFile(d.path)).map((d) => ({ id: d.id, name: d.path, sha256: d.sha256, role: d.role, bytes: registry.current.bytesOf(d.id) })), [managedDocs]); // eslint-disable-line react-hooks/exhaustive-deps
   const docByPath = useMemo(() => new Map(managedDocs.map((d) => [d.path, d])), [managedDocs]);
 
   /** Read the actual uploaded files and analyse them. Nothing typed is required. */
-  const runAnalysis = useCallback(async (answers: Record<string, string> = qAnswers): Promise<AnalysisResult | null> => {
+  const runAnalysis = useCallback(async (answers: Record<string, string> = qAnswers): Promise<AnalysisOutput | null> => {
     const myEpoch = epochRef.current;
     let current = () => epochRef.current === myEpoch;
     setAnalysing(true);
@@ -571,15 +576,17 @@ export default function NewPvrFlow() {
     try {
       const inputs: InputFile[] = [];
       for (const f of files) {
+        if (f.role === 'reference' || isProcessedPvrFile(f.path)) continue;
         inputs.push({ name: f.name, bytes: registry.current.bytesByPath(f.path), role: f.role });
       }
       const manual = manualQty.trim() && manualComponent.trim() ? { quantity: [{ componentId: manualComponent.trim(), value: manualQty.trim(), unit: manualUnit }] } : undefined;
       // Answers are applied as typed resolutions to the inputs, then the whole comparison is re-run.
-      const first = await analyseDocuments({ files: inputs, narrative, manual, extractor: serverExtractor });
+      const readCache = reads.current;
+      const first = await analyseDocuments({ files: inputs, narrative, manual, extractor: serverExtractor, readCache });
       if (!current()) return null; // the document set changed while this ran: its output is obsolete
       const resolutions = resolutionsFrom(first.questions, answers);
       const hasResolutions = Object.keys(resolutions.pairOverride).length + Object.keys(resolutions.unitOverride).length + Object.keys(resolutions.quantitySource).length > 0 || !!resolutions.eventDate;
-      const res = hasResolutions ? await analyseDocuments({ files: inputs, narrative, manual, resolutions, extractor: serverExtractor }) : first;
+      const res = hasResolutions ? await analyseDocuments({ files: inputs, narrative, manual, resolutions, extractor: serverExtractor, readCache }) : first;
       if (!current()) return null;
       setAnalysis(res);
       analysisRef.current = res;
@@ -759,7 +766,7 @@ export default function NewPvrFlow() {
     const run = realCase ? readRunRecord(realCase.id) : null;
     const docs = registry.current.list().filter((d) => incoming.some((i) => i.path === d.path)).map((d) => {
       const stored = d.state === 'stored' || d.state === 'parsed' || !!d.storagePath;
-      return { id: d.id, name: d.name, category: categoryLabel(d.role, d.metadata), role: d.role, sha256: d.sha256, version: d.version, stored, storageDetail: stored ? '' : d.stateDetail, state: d.state, stateDetail: d.stateDetail, hasBytes: registry.current.hasBytes(d.path) };
+      return { id: d.id, name: d.name, category: categoryLabel(d.role, d.metadata, d.path), role: d.role, sha256: d.sha256, version: d.version, stored, storageDetail: stored ? '' : d.stateDetail, state: d.state, stateDetail: d.stateDetail, hasBytes: registry.current.hasBytes(d.path) };
     });
     return buildCoverage(
       docs,
@@ -922,7 +929,8 @@ export default function NewPvrFlow() {
         documents: registry.current.list().map((d) => ({ id: d.id, name: d.path, sha256: d.sha256, version: d.version, role: d.role })),
         analysisVersion: Math.max(1, nextVersion(scopeRef.current) - 1),
       }) : null;
-      const ev = await saveEvidence(caseId, { narrative, ...(handoff ? { handoff } : {}), answers: qAnswers });
+      if (handoff && current && !current.cancelled) handoff.drawingReplay = buildSavedDrawingReplay(current) ?? undefined;
+      const ev = await saveEvidence(caseId, { narrative, handoff, answers: qAnswers });
       if (!ev.saved) notes.push(`The narrative and analysis were not saved to the case: ${ev.error}`);
       if (handoff) saveHandoff(caseId, handoff);
       setCaseFor(scopeRef.current, caseId);

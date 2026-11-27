@@ -1,4 +1,7 @@
 // @vitest-environment node
+import { mkdtemp,rm,writeFile } from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { readDxf, boundsOf } from './dxfRead';
 import { dwgStatus, convertDwg } from './dwgConvert';
@@ -34,7 +37,16 @@ describe('DWG converter', () => {
     const r = await convertDwg(new Uint8Array(200), { DWG_CONVERTER: 'libredwg', DWG_CONVERTER_PATH: '/nonexistent/dwg2dxf' });
     expect(r.ok).toBe(false); expect(r.error).toMatch(/not found|failed/i); expect(r.sourceSha256).toMatch(/^[a-f0-9]{64}$/);
   });
-  // NOTE: no real DWG conversion is asserted here. That needs an installed converter and a real DWG file.
+  it.skipIf(process.platform==='win32')('rejects a converter that wrote output but reported corruption at exit zero',async()=>{
+    const dir=await mkdtemp(join(tmpdir(),'mock-dwg-'));
+    const tool=join(dir,'converter');
+    try {
+      await writeFile(tool,'#!/bin/sh\nif [ "$1" = "--version" ]; then echo fake; exit 0; fi\nprintf "%0120d" 1 > "$4"\nprintf "ERROR: Corrupt DWG section\\n" >&2\nexit 0\n',{mode:0o700});
+      const r=await convertDwg(new TextEncoder().encode('AC1032 fixture'),{DWG_CONVERTER:'libredwg',DWG_CONVERTER_PATH:tool},2000);
+      expect(r.ok).toBe(false);expect(r.dxf).toBeUndefined();
+      expect(r.error).toMatch(/reported errors/);expect(r.warnings).toContain('ERROR: Corrupt DWG section');
+    } finally {await rm(dir,{recursive:true,force:true});}
+  });
 });
 
 describe('upload validation', () => {

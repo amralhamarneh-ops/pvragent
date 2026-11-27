@@ -1,3 +1,4 @@
+import { mergeMatchSnapshotAnswers } from './matchSnapshot';
 import type { CaseStore } from './store';
 import type { BoqImport, CaseRecord, ParsedRow } from './types';
 import type { SavedCalculation } from './revisions';
@@ -666,18 +667,22 @@ export class SupabaseRestStore implements CaseStore {
     return r ? { narrative: r.narrative, handoff: r.handoff, answers: r.answers ?? {}, updatedAt: r.updated_at } : null;
   }
 
-  async saveEvidence(caseId: string, e: { narrative?: string; handoff?: unknown; answers?: Record<string, string> }): Promise<CaseEvidenceRecord> {
+  async saveEvidence(caseId: string, e: { narrative?: string; handoff?: unknown; answers?: Record<string, string>; matchSnapshot?: string }): Promise<CaseEvidenceRecord> {
     await this.ownedCase(caseId);
-    const existing = await this.getEvidence(caseId);
-    // The BOQ inclusion state lives under a reserved key inside answers. A writer that does not know about it (for
-    // example the question-answer path) must not erase it, so it is carried over unless explicitly supplied.
-    const RESERVED = '__boqInclusion';
-    let answers = e.answers ?? existing?.answers ?? {};
-    if (e.answers && !(RESERVED in e.answers) && existing?.answers && RESERVED in existing.answers) answers = { ...e.answers, [RESERVED]: existing.answers[RESERVED] };
-    const merged = { narrative: e.narrative ?? existing?.narrative ?? '', handoff: e.handoff !== undefined ? e.handoff : existing?.handoff ?? null, answers };
-    const updatedAt = new Date().toISOString();
-    await this.req('pvr_case_evidence?on_conflict=case_id', { method: 'POST', prefer: 'resolution=merge-duplicates,return=minimal', body: JSON.stringify({ case_id: caseId, owner_id: this.user.id, narrative: merged.narrative, handoff: merged.handoff, answers: merged.answers, updated_at: updatedAt }) });
-    return { ...merged, updatedAt };
+    const filter = `case_id=eq.${encodeURIComponent(caseId)}&owner_id=eq.${encodeURIComponent(this.user.id)}`;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const existing = await this.getEvidence(caseId);
+      const answers = mergeMatchSnapshotAnswers(existing?.answers ?? {}, e.answers, e.matchSnapshot);
+      const merged = { narrative: e.narrative ?? existing?.narrative ?? '', handoff: e.handoff !== undefined ? e.handoff : existing?.handoff ?? null, answers };
+      // Compare-and-set so a saved preview and a concurrent case edit do not erase each other.
+      const updatedAt = new Date(Math.max(Date.now(), existing ? Date.parse(existing.updatedAt) + 1 : 0)).toISOString();
+      const data = { narrative: merged.narrative, handoff: merged.handoff, answers: merged.answers, updated_at: updatedAt };
+      const result = existing
+        ? await this.req<EvidenceRow[]>(`pvr_case_evidence?${filter}&updated_at=eq.${encodeURIComponent(existing.updatedAt)}`, { method: 'PATCH', prefer: 'return=representation', body: JSON.stringify(data) })
+        : await this.req<EvidenceRow[]>('pvr_case_evidence?on_conflict=case_id', { method: 'POST', prefer: 'resolution=ignore-duplicates,return=representation', body: JSON.stringify({ ...data, case_id: caseId, owner_id: this.user.id }) });
+      if (Array.isArray(result) && result.length === 1) return { ...merged, updatedAt };
+    }
+    throw new Error('The case evidence changed during the save. Reload the case and retry.');
   }
 
   // ---- Persisted valuation state (manual rates, exclusions, deferrals, items, groups, fingerprint) ----

@@ -154,7 +154,7 @@ export function detectValuationOverlaps(lines: OverlapLine[]): OverlapIssue[] {
   for (const l of active) {
     if (l.origin !== 'new_item' || !l.linkedComponentKey) continue;
     const others = priced.get(l.linkedComponentKey);
-    if (others && others.length) out.push({ kind: 'manual_linked_duplicate', lineIds: [l.lineId, ...others.map((o) => o.lineId)], message: 'This added item is linked to a change that is already priced. Keep either the matched line or the added item, not both.' });
+    if (others && others.length) out.push({ kind: 'manual_linked_duplicate', lineIds: [...others.map((o) => o.lineId), l.lineId], message: 'This added item is linked to a change that is already priced. Keep either the matched line or the added item, not both.' });
   }
 
   // Merge identical issues

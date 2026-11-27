@@ -8,6 +8,8 @@ const nextConfig = {
   // Native / WASM document processors must run as plain Node modules, not be bundled.
   serverExternalPackages: ['pdfjs-dist', 'tesseract.js', 'mammoth', '@napi-rs/canvas'],
 
+  outputFileTracingIncludes: { '/api/extract': ['./eng.traineddata'], '/api/processing/status': ['./eng.traineddata'] },
+
   eslint: {
     ignoreDuringBuilds: true,
   },

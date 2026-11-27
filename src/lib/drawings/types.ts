@@ -104,10 +104,16 @@ export interface DrawingFile {
   skippedTypes?: Record<string, number>;
   /** How many INSERTs were expanded into real geometry (with rotation/scale/translation). */
   expandedBlocks?: number;
+  /** A same-stem plotted sheet identified this file as a typical detail, not an installed alignment. */
+  detailOnlyEvidence?: string;
   /** SHA-256 of the original bytes, so a viewer result is tied to the exact file. */
   sha256?: string;
   /** True when external references or unsupported geometry mean quantities may be understated. */
   coverageLimited?: boolean;
+  /** Model-space layers where unread geometry can invalidate an exact takeoff. */
+  coverageGapsByLayer?: Record<string, string[]>;
+  /** Placed references or unread block trees that can contain geometry on any layer. */
+  unboundedCoverageGaps?: { layer: string; reason: string }[];
   /** XREF blocks whose geometry is not in this file. */
   unresolvedXrefs?: string[];
   /** Present when this DXF was produced from a DWG: converter, version, and hashes of both files. */

@@ -18,5 +18,9 @@ async function loadExecFile(): Promise<ExecFileFn> {
 export const runFile: RunFile = async (file, args = [], options = {}) => {
   const execFile = await loadExecFile();
   return new Promise<RunResult>((resolve, reject) => {
+    execFile(file, [...args], { ...options, shell: false, windowsHide: true }, (error, stdout, stderr) => {
+      if (error) { reject(Object.assign(error, { stdout, stderr })); return; }
+      resolve({ stdout, stderr });
+    });
   });
 };

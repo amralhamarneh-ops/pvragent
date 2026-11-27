@@ -121,3 +121,21 @@ test('binary DXF and garbage are refused with a reason, never "read"', async () 
   const bad = await readDxfForWorker('y.dxf', Buffer.from('not a dxf'), {});
   assert.equal(bad.ok === false || bad.coverage?.geometryEntities === 0, true);
 });
+
+test('paper-space copies do not enter worker geometry or length', async () => {
+  const p = [...line('PIPE', 0, 0, 1000, 0), '67', '1'];
+  const r = await readDxfForWorker('layout.dxf', dxf([...HDR(6), ...ENT(line('PIPE', 0, 0, 10, 0), p)]));
+  assert.equal(r.coverage.excludedPaperSpaceEntities, 1);
+  assert.equal(r.coverage.geometryEntities, 1);
+  assert.equal(r.coverage.layers[0].lengthUnits, 10);
+});
+
+test('nonuniform inserts scale straight path by direction and refuse an elliptical bulge', async () => {
+  const curved = ['0', 'LWPOLYLINE', '8', 'CURVED', '90', '2', '70', '0', '10', '0', '20', '0', '42', '1', '10', '2', '20', '0'];
+  const blocks = ['0', 'SECTION', '2', 'BLOCKS', '0', 'BLOCK', '2', 'B', '8', '0', '10', '0', '20', '0', ...line('X', 0, 0, 2, 0), ...line('Y', 0, 0, 0, 2), ...curved, '0', 'ENDBLK', '0', 'ENDSEC'];
+  const ins = ['0', 'INSERT', '8', '0', '2', 'B', '10', '0', '20', '0', '41', '3', '42', '1'];
+  const r = await readDxfForWorker('scales.dxf', dxf([...HDR(6), ...blocks, ...ENT(ins)]));
+  assert.deepEqual(r.coverage.layers.map((l) => [l.layer, l.lengthUnits]), [['X', 6], ['Y', 2]]);
+  assert.equal(r.coverage.skippedTypes['POLYLINE bulge (non-uniform block scale)'], 1);
+  assert.equal(r.coverage.complete, false);
+});

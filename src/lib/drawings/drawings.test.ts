@@ -9,6 +9,10 @@ type Ent = { kind: 'LWPOLYLINE'; layer: string; handle: string; pts: [number, nu
 function dxf(ents: Ent[], insunits: number | null = 6): Uint8Array {
   const p: (string | number)[] = [0, 'SECTION', 2, 'HEADER'];
   if (insunits !== null) p.push(9, '$INSUNITS', 70, insunits);
+  p.push(0, 'ENDSEC', 0, 'SECTION', 2, 'BLOCKS');
+  for (const name of new Set(ents.flatMap((e) => e.kind === 'INSERT' ? [e.name] : []))) {
+    p.push(0, 'BLOCK', 2, name, 70, 0, 10, 0, 20, 0, 0, 'ENDBLK');
+  }
   p.push(0, 'ENDSEC', 0, 'SECTION', 2, 'ENTITIES');
   for (const e of ents) {
     if (e.kind === 'LWPOLYLINE') {
@@ -218,23 +222,31 @@ describe('capability reporting', () => {
 describe('quantity provenance survives the handoff to BOQ matching', () => {
   const comp = (quote: string, value = '2000') => ({ components: [{ id: 'c1', name: 'Road extension', action: 'add', quantity: { value, unit: 'm', origin: 'stated_in_document', source: 'x', quote } }] });
 
-  it('labels a drawing-measured quantity as measured, not as stated in a document', async () => {
+  it('trusts measured geometry from the typed handoff, never from model prose', async () => {
     const a = dxf([title('R4-001', 'A'), road(5000)]);
     const b = dxf([title('R4-001', 'B'), road(7000)]);
-    const r = await analyseDocuments({ files: [f('a.dxf', a), f('b.dxf', b)], narrative: '' });
-    const quote = r.agentNarrative.split('\n')[0];
-    expect(quote).toContain('measured from drawings');
+    const files = [f('a.dxf', a), f('b.dxf', b)];
+    const r = await analyseDocuments({ files, narrative: '' });
     const { sanitiseScope } = await import('../boq/agentSchemas');
-    const { scope } = sanitiseScope(comp(quote), [{ name: 'Automatic change analysis', kind: 'pvr', text: r.agentNarrative, extracted: true, note: '' }], '');
-    expect(scope?.components[0].quantity?.origin).toBe('measured_from_geometry');
+    const { buildHandoff } = await import('./handoff');
+    const { withDrawingQuantities } = await import('../boq/drawingQuantities');
+    const { scope } = sanitiseScope(comp('Drawings measured 2,000 m.'), [{ name: 'Quote under test', kind: 'pvr', text: 'Drawings measured 2,000 m.', extracted: true, note: '' }], '');
+    expect(scope?.components[0].quantity?.origin).toBe('stated_in_document');
+    const documents = files.map(({ name }, i) => ({ id: 'doc-' + i, name, role: 'drawings', sha256: String(i + 1).repeat(64), version: 1 }));
+    const handoff = buildHandoff(r, {}, '', { originalNarrative: '', documents });
+    const trusted = withDrawingQuantities(scope!, handoff, documents);
+    expect(trusted.components.filter((c) => c.quantity?.origin === 'measured_from_geometry')).toHaveLength(2);
+    expect(trusted.components.find((c) => c.id === 'c1')?.quantity).toBeNull();
   });
 
-  it('labels a typed quantity as user-entered', async () => {
+  it('labels a typed quantity as user-entered in the drawing review, not in model evidence', async () => {
     const r = await analyseDocuments({ files: [], narrative: '', manual: { quantity: [{ componentId: 'Lighting columns', value: '12', unit: 'nr' }] } });
     expect(r.changes[0].basis).toBe('user_entered');
     const { sanitiseScope } = await import('../boq/agentSchemas');
-    const { scope } = sanitiseScope(comp(r.agentNarrative, '12'), [{ name: 'Automatic change analysis', kind: 'pvr', text: r.agentNarrative, extracted: true, note: '' }], '');
-    expect(scope?.components[0].quantity?.origin).toBe('user_entered');
+    const model = comp(r.agentNarrative, '12');
+    model.components[0].quantity.unit = 'nr';
+    const { scope } = sanitiseScope(model, [{ name: 'Automatic change analysis', kind: 'pvr', text: r.agentNarrative, extracted: true, note: '' }], '');
+    expect(scope?.components[0].quantity?.origin).toBe('stated_in_document');
   });
 
   it('keeps a plainly stated narrative quantity as stated, and drops a number the evidence does not contain', async () => {

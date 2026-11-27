@@ -47,7 +47,7 @@ export function validateDxf(buf) {
   const num = (k) => { const r = text.match(new RegExp(`\\$${k}\\s*\\r?\\n\\s*10\\s*\\r?\\n\\s*([-+0-9.eE]+)\\s*\\r?\\n\\s*20\\s*\\r?\\n\\s*([-+0-9.eE]+)`)); return r ? { x: Number(r[1]), y: Number(r[2]) } : null; };
   const mn = num('EXTMIN'); const mx = num('EXTMAX');
   let extents = null;
-  if (mn && mx && Number.isFinite(mn.x) && Number.isFinite(mx.x) && Math.abs(mx.x) < 1e19) extents = { minX: mn.x, minY: mn.y, maxX: mx.x, maxY: mx.y };
+  if (mn && mx && [mn.x,mn.y,mx.x,mx.y].every(v=>Number.isFinite(v) && Math.abs(v)<1e19) && mn.x<=mx.x && mn.y<=mx.y) extents = { minX: mn.x, minY: mn.y, maxX: mx.x, maxY: mx.y };
   else issues.push('Converted DXF has no usable $EXTMIN/$EXTMAX; extents will be computed from geometry.');
   if (!/\bENTITIES\b/.test(text)) issues.push('Converted DXF has no ENTITIES section.');
   const xrefs = (text.match(/\n\s*1\s*\r?\n[^\n]*\.dwg\s*\r?\n/gi) || []).length;
@@ -73,6 +73,10 @@ export async function convertDwg(bytes, { env = process.env, timeoutMs = 120_000
       out = env.DWG_CONVERTER_XVFB === '1' ? await run('xvfb-run', ['-a', st.path, ...args], opts) : await run(st.path, args, opts);
     } else out = await run(st.path, ['--as', 'r2013', '-o', join(outDir, 'drawing.dxf'), inFile], opts);
     const warnings = `${out.stdout}\n${out.stderr}`.split('\n').map((l) => l.trim()).filter((l) => /warn|error|unsupported|unknown|invalid|skip/i.test(l)).slice(0, 25);
+    if (/^\s*(?:fatal(?: error)?|error)\s*:/im.test(`${out.stdout}\n${out.stderr}`)) {
+      return {ok:false,error:'DWG conversion reported errors; its DXF is unsafe to use. Provide an issued ASCII DXF or use a validated converter.',
+        converter:st.converter,converterVersion: version,sourceSha256,warnings};
+    }
     const produced = (await readdir(outDir)).find((f) => /\.dxf$/i.test(f));
     if (!produced) return { ok: false, error: 'The converter ran but produced no DXF (DWG version may be unsupported).', converter: st.converter, converterVersion: version, sourceSha256, warnings };
     const dxf = await readFile(join(outDir, produced));
