@@ -2,6 +2,7 @@
 
 import {useEffect,useMemo,useState} from 'react';
 import {compareProgrammeEvidence,describeProgramme,testDurationChange,validateRealProgramme} from '@/lib/assessment/realProgramme';
+import FragmentReplayPanel from '@/app/pvr-demo/FragmentReplayPanel';
 import {drivingPath} from '@/lib/assessment/cpmEngine';
 import type {ProgrammeWhatIf} from '@/lib/pvr/finalForm';
 import type {LoadedSchedule} from '@/lib/mapping/scheduleLoader';
@@ -78,6 +79,7 @@ export default function RealProgrammePanel({source,references,confirmedTaskIds,o
         {(evidence.referenceTies.length>0 || evidence.referenceInternalTies.length>0) && <details><summary>Links involving reference-only activities</summary><ul className="list-disc pl-5">{[...evidence.referenceTies,...evidence.referenceInternalTies].slice(0,40).map((r,i)=><li key={i}>{r.from} → {r.to} ({r.type}{r.lagHours ? `, lag ${r.lagHours} h` : ''})</li>)}</ul></details>}
         {evidence.milestones.length>0 && <details><summary>Changed stored milestones ({evidence.milestones.length})</summary><ul className="list-disc pl-5">{evidence.milestones.slice(0,30).map(a=><li key={a.code}>{a.code}: {a.before} → {a.after} (float {a.floatBefore ?? 'unknown'} → {a.floatAfter ?? 'unknown'} hours)</li>)}</ul></details>}
       </div>}
+      {ref && <FragmentReplayPanel key={ref.sha256} reference={ref} preChange={source} />}
     </section>
   );
 }
