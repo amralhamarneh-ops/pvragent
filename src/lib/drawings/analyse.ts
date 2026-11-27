@@ -3,7 +3,7 @@ import { pairDrawings, measurePair, validatePair, hasRelocationEvidence, relocat
 import { classifyDates, proposeEventDate, hasConflictingEventDates } from './dates';
 import { extractStatedQuantities, narrativeFromChanges, reconcile } from './reconcile';
 import { applyQuantitySources, EMPTY_RESOLUTIONS, type Resolutions } from './resolve';
-import type { Extractor } from './extractClient';
+import type { Extractor, ExtractOutcome } from './extractClient';
 import { parseXerBytes } from '@/lib/mapping/xerParser';
 import type { ScheduleModel } from '@/lib/mapping/types';
 import type { AnalysisQuestion, AnalysisResult, AnalysisStage, CapabilityReport, DrawingFile, DrawingPair, ExtractedDocument, FileReadiness, FoundDate, MeasuredChange, ProcessingEvent, StatedQuantity } from './types';
@@ -17,6 +17,40 @@ export interface InputFile {
   docId?: string;
 }
 
+/** Case-session memo only. Key by the registry's immutable bytes, file name and reader identity. */
+export class AnalysisReadCache {
+  private readonly cad = new WeakMap<Uint8Array, Map<string, DrawingFile>>();
+  private readonly extraction = new WeakMap<Extractor, WeakMap<Uint8Array, Map<string, ExtractOutcome>>>();
+  private readonly schedules = new WeakMap<Uint8Array, Map<string, ScheduleModel>>();
+
+  private async reuse<T>(cache: WeakMap<Uint8Array, Map<string, T>>, name: string, bytes: Uint8Array,
+    load: () => T | Promise<T>, reusable: (value: T) => boolean, signal?: AbortSignal): Promise<T> {
+    const byName = cache.get(bytes) ?? new Map<string, T>();
+    const saved = byName.get(name);
+    if (saved !== undefined) return saved;
+    const value = await load();
+    // Do not cache a rejected/cancelled job or a temporary failed/partial extraction.
+    if (!signal?.aborted && reusable(value)) { byName.set(name, value); cache.set(bytes, byName); }
+    return value;
+  }
+
+  drawing(name: string, bytes: Uint8Array, load: () => Promise<DrawingFile>, signal?: AbortSignal) {
+    return this.reuse(this.cad, name, bytes, load, (d) => d.state === 'read', signal);
+  }
+
+  extract(reader: Extractor, name: string, bytes: Uint8Array, progress?: (detail: string) => void, signal?: AbortSignal) {
+    const cache = this.extraction.get(reader) ?? new WeakMap<Uint8Array, Map<string, ExtractOutcome>>();
+    this.extraction.set(reader, cache);
+    return this.reuse(cache, name, bytes, () => reader(name, bytes, progress, signal),
+      (r) => r.ok && (r.kind === 'dwg' ? !!r.dxf : !!r.doc && !isPartialRead(r.doc)), signal);
+  }
+
+  schedule(name: string, bytes: Uint8Array, signal?: AbortSignal) {
+    return this.reuse(this.schedules, name, bytes, () => parseXerBytes(bytes, name),
+      (m) => m.activityCount > 0 && !m.integrityProblems?.length, signal);
+  }
+}
+
 export interface AnalyseArgs {
   files: InputFile[];
   narrative: string;
@@ -26,12 +60,16 @@ export interface AnalyseArgs {
   resolutions?: Resolutions;
   /** Real processing events, emitted as each stage genuinely happens. */
   onEvent?: (e: ProcessingEvent) => void;
+  /** Keep progress events but skip building/streaming live preview geometry. Final takeoff is unchanged. */
+  streamGeometry?: boolean;
   runId?: string;
   caseId?: string;
   /** Cancels the run. A cancelled run resolves with `cancelled: true` and emits nothing further. */
   signal?: AbortSignal;
   /** PDF/DOCX/OCR/DWG extraction. Without it those formats are reported as not read, never skipped silently. */
   extractor?: Extractor;
+  /** Reuses file reads only; source validation, comparison and reconciliation are always rerun. */
+  readCache?: AnalysisReadCache;
   /** Server capabilities, so unavailable processors are named exactly. */
   capabilities?: { ocrScannedPdf: boolean; dwg: { configured: boolean; requirement?: string } } | null;
 }
@@ -119,6 +157,7 @@ export async function analyseDocuments(args: AnalyseArgs): Promise<AnalysisOutpu
   const schedules: { fileName: string; model: ScheduleModel }[] = [];
   const runId = args.runId ?? 'run';
   const caseId = args.caseId ?? '';
+  const streamGeometry = !!args.onEvent && args.streamGeometry !== false;
   let seq = 0;
   const parsedAnnounced = new Set<string>();
   const cancelled = () => !!args.signal?.aborted;
@@ -126,6 +165,11 @@ export async function analyseDocuments(args: AnalyseArgs): Promise<AnalysisOutpu
     if (cancelled()) return;
     args.onEvent?.({ seq: (seq += 1), runId, caseId, stage, status, detail, at: Date.now(), ...more });
   };
+  const reader = args.extractor;
+  const extract = reader && ((name: string, bytes: Uint8Array, progress?: (detail: string) => void) =>
+    args.readCache
+      ? args.readCache.extract(reader, name, bytes, progress, args.signal)
+      : reader(name, bytes, progress, args.signal));
   let relocationFlag = false;
   let sentencesFound: { source: string; sentence: string }[] = [];
   const finish = (r: AnalysisResult): AnalysisOutput => ({ ...r, extracted, documents, schedules, drawings, relocationEvidence: relocationFlag, relocationSentences: sentencesFound, cancelled: cancelled() });
@@ -147,7 +191,7 @@ export async function analyseDocuments(args: AnalyseArgs): Promise<AnalysisOutpu
       if (e === 'xer' && f.bytes) {
         emit('parsing', 'started', `Parsing programme ${f.name}`, { fileName: f.name });
         try {
-          const model = parseXerBytes(f.bytes, f.name);
+          const model = args.readCache ? await args.readCache.schedule(f.name, f.bytes, args.signal) : parseXerBytes(f.bytes, f.name);
           if (!model.activityCount || model.integrityProblems?.length) throw new Error(model.warnings?.[0] ?? 'No activities found.');
           schedules.push({ fileName: f.name, model });
           readiness.push({ fileName: f.name, role: 'Schedule', state: 'read', stateLabel: 'Read successfully', detail: `${model.activityCount} activities and ${model.relationships.length} relationships read${model.dataDate ? `; data date ${model.dataDate}` : '; no data date found'}.` });
@@ -171,9 +215,9 @@ export async function analyseDocuments(args: AnalyseArgs): Promise<AnalysisOutpu
       let dxfName = f.name; let dxfBytes: Uint8Array | null = null; let convertedBy = '';
       let conversion: import('./extractClient').ConversionInfo | undefined;
       if (e === 'dxf') dxfBytes = f.bytes;
-      else if (e === 'dwg' && args.extractor) {
+      else if (e === 'dwg' && extract) {
         emit('loading', 'progress', `Converting ${f.name} from DWG to DXF`, { fileName: f.name });
-        const out = await args.extractor(f.name, f.bytes, undefined, args.signal);
+        const out = await extract(f.name, f.bytes);
         if (out.kind === 'dwg' && out.ok && out.dxf) { dxfBytes = out.dxf; convertedBy = out.converter ?? ''; conversion = out.conversion; dxfName = f.name; log('Convert DWG', `${f.name}: converted to DXF with ${convertedBy}${conversion?.converterVersion ? ` (${conversion.converterVersion})` : ''}; DXF sha256 ${conversion?.dxfSha256?.slice(0, 12) ?? 'not recorded'}. ${conversion?.warnings?.length ? `${conversion.warnings.length} converter warning(s).` : ''}`.trim()); }
         else {
           const reason = (out.kind === 'dwg' || out.kind === 'text') && out.error ? out.error : unsupportedReason(f.name);
@@ -186,15 +230,16 @@ export async function analyseDocuments(args: AnalyseArgs): Promise<AnalysisOutpu
         }
       }
       if (dxfBytes) {
-        emit('parsing', 'started', `Parsing ${f.name} (the DXF text is parsed as a whole; geometry is delivered after parsing completes)`, { fileName: f.name });
+        emit('parsing', 'started', `Reading ${f.name}${streamGeometry ? ' (geometry appears after the ASCII DXF has been parsed)' : ' (all supported model-space geometry will be checked)'}`, { fileName: f.name });
         const docId = f.docId ?? f.name;
-        let d = await readDxf(dxfName, dxfBytes, (stage, info) => {
+        const source = dxfBytes;
+        const read = () => readDxf(dxfName, source, args.onEvent ? (stage, info) => {
           if (stage === 'layer') emit('geometry', 'progress', info.detail, { fileName: f.name, layer: info.layer, count: info.count });
           else if (stage === 'geometry') emit('geometry', 'done', info.detail, { fileName: f.name, count: info.count });
           else emit('parsing', 'progress', info.detail, { fileName: f.name });
-        }, {
+        } : undefined, {
           signal: args.signal,
-          onBatch: (b) => {
+          onBatch: streamGeometry ? (b) => {
             if (cancelled()) return;
             // First batch means parsing has really finished and geometry is being produced.
             if (!parsedAnnounced.has(f.name)) { parsedAnnounced.add(f.name); emit('parsing', 'done', `${f.name}: parsed; delivering geometry`, { fileName: f.name }); }
@@ -202,8 +247,10 @@ export async function analyseDocuments(args: AnalyseArgs): Promise<AnalysisOutpu
               fileName: f.name, layer: b.layer, count: b.delivered,
               batch: { caseId, runId, documentId: docId, fileName: f.name, batchIndex: b.batchIndex, layer: b.layer, entityIds: b.entityIds, entities: b.entities, metresPerUnit: b.metresPerUnit, unit: b.unit, extents: b.extents, delivered: b.delivered, total: b.total },
             });
-          },
+          } : undefined,
         });
+        // The interactive preview still streams every batch; regular processing avoids generating them at all.
+        let d = args.readCache && !streamGeometry ? await args.readCache.drawing(dxfName, source, read, args.signal) : await read();
         if (cancelled()) break;
         if (convertedBy) {
           const extra = [`Converted from DWG by ${convertedBy}${conversion?.converterVersion ? ` (${conversion.converterVersion})` : ''}; verify units and extents against the source.`, ...(conversion?.warnings ?? []).slice(0, 5).map((w) => `Converter warning: ${w}`), ...(conversion?.validationIssues ?? []).map((w) => `Converted DXF: ${w}`)];
@@ -219,10 +266,10 @@ export async function analyseDocuments(args: AnalyseArgs): Promise<AnalysisOutpu
         if (d.titleBlock) dates.push(...d.titleBlock.dates);
         if (d.state === 'failed' || d.state === 'unsupported') { unsupported.push({ fileName: f.name, reason: d.limitation }); readiness.push({ fileName: f.name, role: 'Drawing', state: d.state, stateLabel: d.state === 'unsupported' ? 'Not supported' : 'Read failed', detail: d.limitation }); emit('parsing', 'failed', d.limitation, { fileName: f.name }); }
         else { readiness.push({ fileName: f.name, role: 'Drawing', state: 'read', stateLabel: d.coverageLimited ? 'Partially read' : 'Read successfully', detail: `${d.entities.length} entities, ${d.layers.length} layers. ${d.coverageLimited ? 'COVERAGE IS LIMITED: ' + d.validationIssues.filter((i) => /external reference|Coverage is limited/.test(i)).join(' ') + ' ' : ''}Not yet validated for measurement.` }); if (d.coverageLimited) unsupported.push({ fileName: f.name, reason: `Coverage limited - ${d.validationIssues.filter((i) => /external reference|Coverage is limited/.test(i)).join(' ')}` }); emit('parsing', 'done', `${f.name}: ${d.entities.length} entities on ${d.layers.length} layer(s)`, { fileName: f.name, count: d.entities.length }); }
-      } else if (DOC_EXT.test(f.name) && args.extractor) {
+      } else if (DOC_EXT.test(f.name) && extract) {
         // Flattened drawing (PDF/scan): text only. Analysed regions are pages; no layers exist and nothing is measured.
         emit('parsing', 'started', `Reading flattened drawing ${f.name} (text only)`, { fileName: f.name });
-        const out = await args.extractor(f.name, f.bytes, (d) => emit('parsing', 'progress', d, { fileName: f.name }), args.signal);
+        const out = await extract(f.name, f.bytes, (d) => emit('parsing', 'progress', d, { fileName: f.name }));
         if (cancelled()) break;
         const reason = unsupportedReason(f.name.replace(/\.pdf$/i, '.png'));
         if (out.kind === 'text' && out.ok && out.doc) {
@@ -280,9 +327,9 @@ export async function analyseDocuments(args: AnalyseArgs): Promise<AnalysisOutpu
       log('Read document', `${f.name}: ${text.length} characters read (${f.bytes.byteLength > MAX_TEXT ? 'first 400,000 bytes only' : 'complete'}); ${q.length} quantity(ies), ${dts.length} date(s).`);
       readiness.push({ fileName: f.name, role: f.role === 'pvr' ? 'PVR' : f.role, state: 'read', stateLabel: 'Read successfully', detail: `${q.length} quantities and ${dts.length} dates found${f.bytes.byteLength > MAX_TEXT ? '; only the first 400,000 bytes were read' : ''}.` });
       emit('parsing', 'done', `${f.name}: ${text.length} characters`, { fileName: f.name, count: text.length });
-    } else if (textual && DOC_EXT.test(f.name) && f.bytes && args.extractor) {
+    } else if (textual && DOC_EXT.test(f.name) && f.bytes && extract) {
       emit('parsing', 'started', `Extracting text from ${f.name}`, { fileName: f.name });
-      const out = await args.extractor(f.name, f.bytes, (d) => emit('parsing', 'progress', d, { fileName: f.name }), args.signal);
+      const out = await extract(f.name, f.bytes, (d) => emit('parsing', 'progress', d, { fileName: f.name }));
       if (cancelled()) break;
       if (out.kind === 'text' && out.ok && out.doc) {
         const doc = out.doc; documents.push(doc);

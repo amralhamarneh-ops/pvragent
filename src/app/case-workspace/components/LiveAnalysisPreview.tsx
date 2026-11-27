@@ -6,6 +6,7 @@ import { STAGES, coverageOf, initialPlayback, playbackLabel, playbackReducer, vi
 
 interface Props {
   run: RunState;
+  streamGeometry?: boolean;
   /** Layers in the finished geometry, used only for a Replay after the run has completed. */
   finishedLayers: { name: string; count: number }[];
   onCancel: () => void;
@@ -27,7 +28,7 @@ const useReducedMotion = (): boolean => {
  * Status for a processing run. While the run is live the picture is whatever geometry has actually arrived, so there
  * is no timer here. The only timed reveal is an explicit Replay of a completed run, and it is labelled as one.
  */
-export default function LiveAnalysisPreview({ run, finishedLayers, onCancel, replaying, onReplayStart, onReplayStop, onReveal }: Props) {
+export default function LiveAnalysisPreview({ run, finishedLayers, onCancel, replaying, onReplayStart, onReplayStop, onReveal, streamGeometry = true }: Props) {
   const reduced = useReducedMotion();
   const [pb, dispatch] = useReducer(playbackReducer, reduced, initialPlayback);
   const running = run.status === 'running';
@@ -49,7 +50,7 @@ export default function LiveAnalysisPreview({ run, finishedLayers, onCancel, rep
   useEffect(() => { if (replaying && shown >= finishedLayers.length && finishedLayers.length > 0) { /* stay on the finished picture; user ends the replay */ } }, [replaying, shown, finishedLayers.length]);
 
   if (run.status === 'idle') return null;
-  const label = playbackLabel(run, replaying);
+  const label = running && !streamGeometry ? 'Processing all supported geometry without live animation' : playbackLabel(run, replaying);
 
   return (
     <section aria-label="Live drawing analysis" className="rounded-lg border border-border bg-card p-4 shadow-sm">

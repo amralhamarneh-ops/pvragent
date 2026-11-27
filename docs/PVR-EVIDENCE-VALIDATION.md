@@ -19,3 +19,10 @@ Use a synthetic DXF pair with known differences, a DWG plus an independently iss
 Keep benchmark quantities, rates and P6 outputs in a separate reference partition. Run the tool against source files first, save the output, and then compare quantity by scope/unit; applied unit rate with source; activity and tie coverage; and recalculated finish only where the unchanged programme reproduced. Report unverified coverage separately from accuracy. Report per-reader failures as well as scores.
 
 Use reviewed examples only in a separate learning partition with a named reviewer and independent scope and source checks. A held-out case is not a training example. Parser and prompt improvements and passing synthetic tests are not a model fine-tune or proof of live accuracy.
+
+## Drawing performance without a faster-but-weaker answer
+
+- Normal intake no longer builds live viewer batches that nobody is subscribed to. In the drawing panel, turn **Animate geometry while processing** off for a large file. The selected valid pair still opens in the full viewer when completed, and the takeoff and evidence gates do not change. Comparison viewer models are built only for the selected pair.
+- Repeat runs in a case reuse successful reads for the same in-memory file bytes and name. Replacing the file, switching cases or failing/partially reading a document does not produce a stale result. The comparison, quantity gates and evidence reconciliation are recalculated on every run.
+- Unchanged entities still match by the same full geometry signature. Relocation candidates are now found by an indexed range query using the same size predicate, original order and count. Ambiguity and evidence requirements are unchanged.
+- To reproduce a speed test, run once on a cold pair and again without changing the inputs. Compare all measured quantities, source handles, ambiguity flags and limitations. Separate upload/storage time, native CAD conversion or OCR, geometry comparison and viewer rendering when timing. A synthetic stress test isolates comparison; it does not measure end-to-end hosted processing.

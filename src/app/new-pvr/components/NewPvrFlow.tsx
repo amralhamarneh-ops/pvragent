@@ -9,7 +9,7 @@ import DocumentsStep from '@/app/new-pvr/components/DocumentsStep';
 import EvidencePack from '@/app/new-pvr/components/EvidencePack';
 import TriageStep, { type ProjectChoice } from '@/app/new-pvr/components/TriageStep';
 import PrerequisitesStep from '@/app/new-pvr/components/PrerequisitesStep';
-import { analyseDocuments, type InputFile } from '@/lib/drawings/analyse';
+import { AnalysisReadCache, analyseDocuments, type InputFile } from '@/lib/drawings/analyse';
 import DrawingAnalysisPanel, { type PanelDoc } from '@/app/case-workspace/components/DrawingAnalysisPanel';
 import BackgroundJobPanel from '@/app/case-workspace/components/BackgroundJobPanel';
 import { serverExtractor } from '@/lib/drawings/extractClient';
@@ -109,6 +109,7 @@ export default function NewPvrFlow() {
   const [manualDate, setManualDate] = useState('');
   /** One shared registry for every upload path. Bytes live here (and in IndexedDB / authorised storage), never in a loose ref. */
   const registry = useRef<DocumentRegistry>(new DocumentRegistry());
+  const reads = useRef(new AnalysisReadCache());
   const [registryVersion, setRegistryVersion] = useState(0);
   const bump = useCallback(() => setRegistryVersion((v) => v + 1), []);
   const [missingBytes, setMissingBytes] = useState<Set<string>>(new Set());
@@ -152,6 +153,7 @@ export default function NewPvrFlow() {
     setActiveScope(id);
     const d = draft ?? emptyDraft(id);
     registry.current.clear();
+    reads.current = new AnalysisReadCache();
     setIncoming(d.files);
     setRoleOverride(d.roleOverride as Record<string, FileRole>);
     roleOverrideRef.current = d.roleOverride as Record<string, FileRole>;
@@ -274,6 +276,7 @@ export default function NewPvrFlow() {
     setSelectedDocs(new Set());
     setStaleReason('');
     registry.current.clear();
+    reads.current = new AnalysisReadCache();
     setMissingBytes(new Set());
     if (narrative.trim().length === 0) setNarrative('Extend access road R4 from 5.0 km to 7.0 km, including pavement, kerbs and lighting.');
   };
@@ -360,6 +363,7 @@ export default function NewPvrFlow() {
       }
       epochRef.current += 1;
       registry.current.clear();
+      reads.current = new AnalysisReadCache();
       setIncoming([]);
       setRoleOverride({}); roleOverrideRef.current = {};
       setSubroles({});
@@ -577,11 +581,12 @@ export default function NewPvrFlow() {
       }
       const manual = manualQty.trim() && manualComponent.trim() ? { quantity: [{ componentId: manualComponent.trim(), value: manualQty.trim(), unit: manualUnit }] } : undefined;
       // Answers are applied as typed resolutions to the inputs, then the whole comparison is re-run.
-      const first = await analyseDocuments({ files: inputs, narrative, manual, extractor: serverExtractor });
+      const readCache = reads.current;
+      const first = await analyseDocuments({ files: inputs, narrative, manual, extractor: serverExtractor, readCache });
       if (!current()) return null; // the document set changed while this ran: its output is obsolete
       const resolutions = resolutionsFrom(first.questions, answers);
       const hasResolutions = Object.keys(resolutions.pairOverride).length + Object.keys(resolutions.unitOverride).length + Object.keys(resolutions.quantitySource).length > 0 || !!resolutions.eventDate;
-      const res = hasResolutions ? await analyseDocuments({ files: inputs, narrative, manual, resolutions, extractor: serverExtractor }) : first;
+      const res = hasResolutions ? await analyseDocuments({ files: inputs, narrative, manual, resolutions, extractor: serverExtractor, readCache }) : first;
       if (!current()) return null;
       setAnalysis(res);
       analysisRef.current = res;
