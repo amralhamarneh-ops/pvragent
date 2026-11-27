@@ -1,4 +1,5 @@
 import { readDxf } from './dxfRead';
+import { missingReferencedSheets } from './referencedSheets';
 import { pairDrawings, measurePair, validatePair, hasRelocationEvidence, relocationSentences, evidenceForObject, isDetailOnlyTitle, type RelocationInput } from './compare';
 import { classifyDates, proposeEventDate, hasConflictingEventDates } from './dates';
 import { extractStatedQuantities, narrativeFromChanges, reconcile } from './reconcile';
@@ -154,6 +155,7 @@ export async function analyseDocuments(args: AnalyseArgs): Promise<AnalysisOutpu
   const detailCompanions = new Map<string, string[]>();
   const stemOf = (n: string) => (n.split(/[\\/]/).at(-1) ?? n).replace(/\.[^.]+$/, '').toLowerCase();
   const documents: ExtractedDocument[] = [];
+  const drawingTexts: ExtractedDocument[] = [];
   const schedules: { fileName: string; model: ScheduleModel }[] = [];
   const runId = args.runId ?? 'run';
   const caseId = args.caseId ?? '';
@@ -274,6 +276,7 @@ export async function analyseDocuments(args: AnalyseArgs): Promise<AnalysisOutpu
         const reason = unsupportedReason(f.name.replace(/\.pdf$/i, '.png'));
         if (out.kind === 'text' && out.ok && out.doc) {
           documents.push(out.doc);
+          drawingTexts.push({ ...out.doc, name: f.name });
           const txt = textOfDoc(out.doc);
           // A labelled typical detail may state component dimensions without any installed quantity.
           // Check only its title block (not every occurrence of “typical detail” in notes).
@@ -360,6 +363,9 @@ export async function analyseDocuments(args: AnalyseArgs): Promise<AnalysisOutpu
     }
   }
   if (cancelled()) return finish({ startedAt, files: readiness, pairs: [], changes: [], dates, proposedEventDate: null, questions, capability: { ...CAPABILITY, unsupported }, events, agentNarrative: '' });
+
+  questions.push(...missingReferencedSheets(drawingTexts, drawings
+    .map((f) => ({ name: f.fileName, available: f.state === 'read' && !f.coverageLimited }))));
 
   // Pair, honouring the user's pairing/order answers, then validate and measure.
   emit('alignment', 'started', `Pairing ${drawings.length} drawing(s) and checking units and alignment`);

@@ -58,3 +58,31 @@ describe('CAD quantity guardrails', () => {
     expect(result.changes).toHaveLength(0);
   });
 });
+
+describe('referenced drawing dependencies', () => {
+  const sheet = 'SYN_TST_A10_001.dwg';
+  const pdf = (name: string, role: 'drawings' | 'reference' = 'drawings') => ({ name, role, bytes: rows('pdf') });
+  const reader: import('./extractClient').Extractor = async (name) => ({
+    kind: 'text', ok: true,
+    doc: { name, method: 'pdf-text', truncated: false, limitation: '', pages: [
+      { page: 1, text: 'File stamp: SOME_DRAWING_ID.dwg' },
+      { page: 4, text: `1. FOR DETAILS REFER TO DWG.NO.\n${sheet}.` },
+      { page: 5, text: `See drawing ${sheet}.` },
+    ] },
+  });
+  it('retains the cited CAD file and physical page, without creating a quantity', async () => {
+    const output = await analyseDocuments({files:[pdf('issued.pdf'), pdf('reference.pdf', 'reference')], narrative:'', extractor:reader});
+    const q = output.questions.filter((x) => x.id.startsWith('referenced-drawing-'));
+    expect(q).toHaveLength(1);
+    expect(q[0].issue).toContain(sheet);
+    expect(q[0].evidence).toEqual(['issued.pdf, page 4', 'issued.pdf, page 5']);
+    expect(output.changes).toEqual([]);
+  });
+  it('requires available drawing bytes and recognises a same-number DXF export', async () => {
+    const files = [pdf('issued.pdf'), { name: 'directory/syn-tst-a10-001.dxf', role: 'drawings' as const, bytes: null as Uint8Array | null }];
+    const run = () => analyseDocuments({files, narrative:'', extractor:reader});
+    expect((await run()).questions.some((q) => q.id.startsWith('referenced-drawing-'))).toBe(true);
+    files[1].bytes = dxf(6, ...line('PIPE', 12));
+    expect((await run()).questions.some((q) => q.id.startsWith('referenced-drawing-'))).toBe(false);
+  });
+});
