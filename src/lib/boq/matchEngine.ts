@@ -360,6 +360,7 @@ function lineFor(comp: ScopeComponent, item: BoqItemRecord, role: 'primary' | 'a
     calc: null, status: 'needs_input', statusNote: '', specConflict: cand?.specConflict ?? null, matchBasis: cand?.reasons ?? [],
   };
   if (role === 'alternative') return base;
+  if (cand?.specConflict) { base.status = 'blocked'; base.statusNote = `Specification conflict: ${cand.specConflict}`; return base; }
   if (!q) { base.statusNote = 'No quantity is stated for this component.'; return base; }
   const d = answers.derivation[comp.id];
   const derivationInputs = d ? Object.entries(d.inputs).filter(([, v]) => v.value.trim()).map(([name, v]) => ({ name, value: v.value, unit: v.unit || 'm' })) : undefined;

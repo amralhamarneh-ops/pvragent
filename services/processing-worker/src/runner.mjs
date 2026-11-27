@@ -42,7 +42,7 @@ export async function executeTask(task, { signal, emit, shouldStop }) {
     });
     if (r.state === 'stopped') return { status: 'cancelled', error: r.error };
     if (!r.ok) return { status: 'failed', error: r.error, result: { kind: 'dxf', ok: false, state: r.state } };
-    return { status: r.coverage.complete ? 'completed' : 'partial', result: { kind: 'dxf', ok: true, state: r.state, fileName: task.fileName, sha256: got, coverage: r.coverage, texts: r.texts } };
+    return { status: r.coverage.complete ? 'completed' : 'partial', result: { kind: 'dxf', ok: true, state: r.state, fileName: task.fileName, sha256: got, coverage: r.coverage, inventory: r.inventory, texts: r.texts } };
   }
   if (e === 'dwg') {
     await emit('stage', 'Converting DWG to DXF');
@@ -52,7 +52,7 @@ export async function executeTask(task, { signal, emit, shouldStop }) {
     if (r.state === 'stopped') return { status: 'cancelled', error: r.error };
     if (!r.ok) return { status: 'failed', error: r.error, result: { kind: 'dwg', ok: false, converter: c.converter, converterVersion: c.converterVersion } };
     r.coverage.issues.push(...(c.warnings ?? []).map((w) => `Converter: ${w}`), ...(c.validation?.issues ?? []));
-    return { status: r.coverage.complete && !(c.warnings ?? []).length ? 'completed' : 'partial', result: { kind: 'dwg', ok: true, converter: c.converter, converterVersion: c.converterVersion, sourceSha256: got, dxfSha256: c.dxfSha256, coverage: r.coverage, texts: r.texts } };
+    return { status: r.coverage.complete && !(c.warnings ?? []).length ? 'completed' : 'partial', result: { kind: 'dwg', ok: true, converter: c.converter, converterVersion: c.converterVersion, sourceSha256: got, dxfSha256: c.dxfSha256, coverage: r.coverage, inventory: r.inventory, texts: r.texts } };
   }
   const kind = sniff(bytes);
   await emit('stage', `Extracting ${e.toUpperCase()}`);

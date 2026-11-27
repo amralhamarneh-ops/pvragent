@@ -19,6 +19,7 @@ export async function GET(req: NextRequest) {
     const s = await storeFor(req);
     const [rules, deliveries] = await Promise.all([s.listRules(), s.listDeliveries(100)]);
     const dir = loadDirectory();
+    return NextResponse.json({ rules, deliveries, providers: providerStatuses(process.env), directory: { count: dir.entries.length, source: dir.source }, events: LIFECYCLE_EVENTS });
   } catch (e) { return fail(e); }
 }
 
@@ -75,7 +76,7 @@ export async function POST(req: NextRequest) {
         if (!tested) return bad('Run a test notification for this rule before enabling live delivery.', 409);
       }
       const saved = await s.saveRule({ ...r, enabled, enabledBy: enabled ? String(b.by ?? 'Admin').slice(0, 80) : null, enabledAt: enabled ? new Date().toISOString() : null });
-      const connected = providerStatuses(process.env as Record<string, string | undefined>).find((p) => p.channel === saved.channel)?.connected;
+      const connected = providerStatuses(process.env).find((p) => p.channel === saved.channel)?.connected;
       return NextResponse.json({ rule: saved, warning: enabled && !connected ? `Enabled, but the ${saved.channel} channel has no connected provider, so live deliveries will be recorded as blocked.` : null });
     }
 
@@ -85,7 +86,7 @@ export async function POST(req: NextRequest) {
       const mode: Mode = action === 'preview' ? 'preview' : 'test';
       const ev = (b.event ?? {}) as { ref?: string; projectId?: string; vars?: Record<string, string> };
       const event = { type: r.triggerEvent, ref: String(ev.ref ?? 'sample-event'), vars: { 'pvr.reference': 'PVR-SAMPLE', 'pvr.title': 'Sample PVR', 'project.name': 'Sample project', 'event.label': LIFECYCLE_EVENTS.find((e) => e.id === r.triggerEvent)?.label ?? r.triggerEvent, 'job.id': 'job-sample', link: '/project-cases', ...(ev.vars ?? {}) }, projectId: ev.projectId ?? null };
-      const planned = planDeliveries(r, event, mode, loadDirectory().entries, providerStatuses(process.env as Record<string, string | undefined>));
+      const planned = planDeliveries(r, event, mode, loadDirectory().entries, providerStatuses(process.env));
       const stored = mode === 'test' ? await Promise.all(planned.map((p) => s.recordDelivery(toDelivery(r.id, r.channel, event.type, event.ref, null, mode, p)))) : [];
       return NextResponse.json({ mode, planned, recorded: stored.map((x) => ({ id: x.row.id, duplicate: x.duplicate, attempts: x.row.attempts })), sentToRealRecipients: 0 });
     }
@@ -99,7 +100,7 @@ export async function POST(req: NextRequest) {
       const rules = (await s.listRules()).filter((r) => r.triggerEvent === type);
       const results = [];
       for (const r of rules) {
-        const planned = planDeliveries(r, { type, ref, vars, projectId: b.projectId ? String(b.projectId) : null }, mode, loadDirectory().entries, providerStatuses(process.env as Record<string, string | undefined>));
+        const planned = planDeliveries(r, { type, ref, vars, projectId: b.projectId ? String(b.projectId) : null }, mode, loadDirectory().entries, providerStatuses(process.env));
         const rec = await Promise.all(planned.map((p) => s.recordDelivery(toDelivery(r.id, r.channel, type, ref, b.caseId ? String(b.caseId) : null, mode, p))));
         results.push({ ruleId: r.id, name: r.name, deliveries: rec.map((x) => ({ status: x.row.status, role: x.row.recipientRole, duplicate: x.duplicate, attempts: x.row.attempts, detail: x.row.detail })) });
       }
