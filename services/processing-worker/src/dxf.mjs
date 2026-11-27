@@ -27,11 +27,18 @@ const thin = (g) => {
 
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const isPt = (v) => !!v && typeof v === 'object' && num(v.x) !== null && num(v.y) !== null;
+const nonPlanar = (e) => (num(e.extrusionDirection?.x ?? e.extrusionDirectionX) ?? 0) !== 0
+  || (num(e.extrusionDirection?.y ?? e.extrusionDirectionY) ?? 0) !== 0
+  || (num(e.extrusionDirection?.z ?? e.extrusionDirectionZ) ?? 1) !== 1;
 const apply = (m, p) => ({ x: m.a * p.x + m.c * p.y + m.tx, y: m.b * p.x + m.d * p.y + m.ty });
 const mul = (p, q) => ({ a: p.a * q.a + p.c * q.b, b: p.b * q.a + p.d * q.b, c: p.a * q.c + p.c * q.d, d: p.b * q.c + p.d * q.d, tx: p.a * q.tx + p.c * q.ty + p.tx, ty: p.b * q.tx + p.d * q.ty + p.ty });
 const ID = { a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0 };
 const detScale = (m) => Math.sqrt(Math.abs(m.a * m.d - m.b * m.c));
-const uniform = (m) => Math.abs(Math.hypot(m.a, m.b) - Math.hypot(m.c, m.d)) < 1e-9 * Math.max(1, Math.hypot(m.a, m.b));
+const uniform = (m) => {
+  const u = Math.hypot(m.a, m.b); const v = Math.hypot(m.c, m.d);
+  return u > 0 && v > 0 && Math.abs(u - v) <= 1e-9 * Math.max(u, v)
+    && Math.abs(m.a * m.c + m.b * m.d) <= 1e-9 * u * v;
+};
 
 /** Arc through two vertices with a DXF bulge, returned as a polyline of points (for preview) plus its true length. */
 function bulgePoints(p1, p2, bulge) {
@@ -63,6 +70,10 @@ const round = (n) => Math.round(n * 1000) / 1000;
 
 function toGeometry(e, m, layer, skipped) {
   const kind = String(e.type ?? '');
+  if (nonPlanar(e)) {
+    bump(skipped, 'non-planar object coordinate system');
+    return null;
+  }
   if (kind === 'LINE' || kind === 'LWPOLYLINE' || kind === 'POLYLINE') {
     const pts = (Array.isArray(e.vertices) ? e.vertices : []).filter(isPt);
     if (pts.length < 2) return null;
@@ -71,10 +82,15 @@ function toGeometry(e, m, layer, skipped) {
     const path = []; let length = 0;
     for (let i = 0; i < n; i += 1) {
       const a = pts[i]; const b = pts[(i + 1) % pts.length];
-      const seg = bulgePoints({ x: a.x, y: a.y }, { x: b.x, y: b.y }, num(a.bulge) ?? 0);
+      const bulge = num(a.bulge) ?? 0;
+      if (Math.abs(bulge) > 1e-12 && !uniform(m)) {
+        bump(skipped, 'POLYLINE bulge (non-uniform block scale)');
+        return null;
+      }
+      const seg = bulgePoints({ x: a.x, y: a.y }, { x: b.x, y: b.y }, bulge);
       const w = seg.pts.map((p) => apply(m, p));
       if (!path.length) path.push(...w); else path.push(...w.slice(1));
-      length += seg.length * detScale(m);
+      length += seg.pts.length > 2 ? seg.length * detScale(m) : Math.hypot(w[1].x - w[0].x, w[1].y - w[0].y);
     }
     return { kind, layer, closed, points: path.map((p) => [round(p.x), round(p.y)]), length: round(length) };
   }
@@ -90,14 +106,14 @@ function toGeometry(e, m, layer, skipped) {
     const c = e.center; const r = num(e.radius); const s = num(e.startAngle); const en = num(e.endAngle);
     if (!isPt(c) || r === null || s === null || en === null) return null;
     if (!uniform(m)) { skipped['ARC (non-uniform block scale)'] = (skipped['ARC (non-uniform block scale)'] ?? 0) + 1; return null; }
-    const rot = Math.atan2(m.b, m.a); const k = detScale(m); const wc = apply(m, c);
-    const ap = arcPoints(wc.x, wc.y, r * k, s + rot, en + rot);
-    return { kind, layer, closed: false, points: ap.pts.map((p) => [round(p.x), round(p.y)]), length: round(ap.length) };
+    const ap = arcPoints(c.x, c.y, r, s, en);
+    return { kind, layer, closed: false, points: ap.pts.map((p) => apply(m, p)).map((p) => [round(p.x), round(p.y)]), length: round(ap.length * detScale(m)) };
   }
   return null;
 }
 
 function expandInsert(e, m, blocks, depth, emit, skipped, state) {
+  if (nonPlanar(e)) { bump(skipped, 'INSERT (non-planar object coordinate system)'); return true; }
   const name = String(e.name ?? ''); const def = blocks[name]; const pos = isPt(e.position) ? e.position : null;
   if (!def || !Array.isArray(def.entities) || !pos) return false;
   if (depth >= MAX_DEPTH) { skipped['INSERT (nesting deeper than 8)'] = (skipped['INSERT (nesting deeper than 8)'] ?? 0) + 1; return true; }
@@ -177,8 +193,9 @@ export async function readDxfForWorker(fileName, bytes, { onBatch, shouldStop, p
   const skipped = {}; const processedTypes = {}; const layerGeo = new Map();
   const state = { expanded: 0, textEntities: 0 };
   const emit = (g) => { if (!layerGeo.has(g.layer)) layerGeo.set(g.layer, []); layerGeo.get(g.layer).push(g); bump(processedTypes, g.kind); };
-  let inserts = 0; const texts = [];
+  let inserts = 0; let excludedPaper = 0; const texts = [];
   for (const e of raw) {
+    if (e.inPaperSpace === true) { excludedPaper += 1; continue; }
     if (['TEXT', 'MTEXT', 'ATTRIB', 'ATTDEF'].includes(e.type)) { state.textEntities += 1; const t = String(e.text ?? e.string ?? '').trim(); if (t && texts.length < 200) texts.push(t.slice(0, 200)); continue; }
     if (e.type === 'INSERT') { inserts += 1; if (!expandInsert(e, ID, blocks, 0, emit, skipped, state)) bump(skipped, `INSERT of undefined block "${String(e.name ?? '')}"`); continue; }
     const g = toGeometry(e, ID, String(e.layer ?? '0'), skipped);
@@ -236,8 +253,8 @@ export async function readDxfForWorker(fileName, bytes, { onBatch, shouldStop, p
     ok: true,
     state: complete ? 'read' : 'read_with_limits',
     coverage: {
-      complete,
-      scope: complete ? 'All entities in this file were of supported types and were processed.' : 'Only the supported geometry types below were processed. This is not a complete reproduction of the CAD content.',
+      complete, excludedPaperSpaceEntities: excludedPaper,
+      scope: complete ? 'All model-space entities in this file were of supported types and were processed.' : 'Only the supported geometry types below were processed. This is not a complete reproduction of the CAD content.',
       unit, metresPerUnit, extents: ext, issues,
       layers: layerStats, processedTypes, skippedTypes: skipped, skippedEntityCount: skippedTotal,
       supportedEntityTypes: ['LINE', 'LWPOLYLINE', 'POLYLINE', 'CIRCLE', 'ARC', 'INSERT (expanded)'],

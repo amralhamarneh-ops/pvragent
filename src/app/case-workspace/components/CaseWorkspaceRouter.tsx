@@ -13,7 +13,7 @@ function Router() {
   const demo = params?.get('demo') === '1';
 
   // Real and demo cases never share a code path or a storage key.
-  if (caseId) return <RequireSignIn purpose="open this case"><RealCaseWorkspace caseId={caseId} /></RequireSignIn>;
+  if (caseId) return <RequireSignIn purpose="open this case"><RealCaseWorkspace key={caseId} caseId={caseId} /></RequireSignIn>;
   if (demo) {
     return (
       <>

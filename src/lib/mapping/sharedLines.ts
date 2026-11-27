@@ -73,8 +73,8 @@ export function buildSharedLinesDetailed(scope: ChangeScope | null, outcome: Ass
         sourceKey, componentKey, componentId: c.id, name: c.name,
         origin: primary ? 'boq' : 'scope_only',
         work: workFrom('', c, unit),
-        priced: amt !== null, signedAmount: amt, currency: primary?.item.currency || currency,
-        source: primary ? `${primary.item.sourceFile} · ${primary.item.sheet}!${primary.item.rowNumber}` : 'No BOQ row matched',
+        priced: amt !== null, signedAmount: amt, currency: primary?.manual?.rate.currency || primary?.item.currency || currency,
+        source: primary?.manual?.rate.processedPvr ? `Processed PVR · Pilot · ${primary.manual.rate.processedPvr.file} p.${primary.manual.rate.processedPvr.page} · ${primary.manual.rate.processedPvr.row}` : primary ? `${primary.item.sourceFile} · ${primary.item.sheet}!${primary.item.rowNumber}` : 'No BOQ row matched',
       });
       overlapIn.push({
         componentKey, sourceKey, description: primary?.item.description ?? c.name,

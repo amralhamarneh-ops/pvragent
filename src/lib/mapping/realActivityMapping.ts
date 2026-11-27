@@ -56,7 +56,7 @@ export function phaseOf(text: string): OperationPhase {
   return best;
 }
 
-const STOP = new Set(['the', 'and', 'of', 'to', 'a', 'in', 'for', 'at', 'with', 'by', 'on', 'new', 'additional', 'extra', 'supply', 'install', 'provide', 'including', 'all', 'complete', 'as', 'per', 'from', 'or', 'an', 'be', 'is', 'work', 'works']);
+const STOP = new Set(['existing', 'roadside', 'system', 'systems', 'construction', 'operation', 'the', 'and', 'of', 'to', 'a', 'in', 'for', 'at', 'with', 'by', 'on', 'new', 'additional', 'extra', 'supply', 'install', 'provide', 'including', 'all', 'complete', 'as', 'per', 'from', 'or', 'an', 'be', 'is', 'work', 'works']);
 const SYN: string[][] = [
   ['asphalt', 'bituminous', 'blacktop', 'wearing', 'macadam', 'surfacing'],
   ['kerb', 'curb', 'kerbstone'],
@@ -74,22 +74,202 @@ const SYN: string[][] = [
 const SYN_INDEX = new Map<string, number>();
 SYN.forEach((g, i) => g.forEach((w) => { if (!SYN_INDEX.has(w)) SYN_INDEX.set(w, i); }));
 
+function canonical(s: string): string {
+  return s.toLowerCase().replace(/\b(?:guard|gaurd)[\s-]*rails?\b/g, 'guardrail')
+    .replace(/\b(?:recycled|recycle|reclaimed|treated effluent)\s+water\b/g, 'recycled water')
+    .replace(/\bcrush\s+cushion\b/g, 'crash cushion');
+}
+
 function tokens(s: string): string[] {
-  return s.toLowerCase().replace(/[^a-z0-9\s-]/g, ' ').split(/\s+/).map((t) => t.replace(/^-+|-+$/g, '')).filter((t) => t.length > 1 && !STOP.has(t));
+  return canonical(s).replace(/[^a-z0-9\s-]/g, ' ').split(/\s+/).map((t) => t.replace(/^-+|-+$/g, '')).filter((t) => t.length > 1 && !STOP.has(t));
 }
 const stem = (t: string) => (t.length > 4 ? t.replace(/(ing|ed|es|s)$/, '') : t);
 const groupsOf = (ts: string[]) => { const g = new Set<number>(); for (const t of ts) { const i = SYN_INDEX.get(t) ?? SYN_INDEX.get(stem(t)); if (i !== undefined) g.add(i); } return g; };
 
-/** Location tokens such as a road code or "Zone C" - generic words and codes only; chainage-style ranges are compared numerically. */
-function locationTokens(s: string): string[] { return tokens(s).filter((t) => t.length > 1); }
+/** Structured identifiers avoid matching "Bridge 94A" with "Bridge 94B" or "IC91" with "IC92". */
+function locationsIn(text: string): Map<string, Set<string>> {
+  const values = new Map<string, Set<string>>();
+  const add = (kind: string, value: string) => {
+    const set = values.get(kind) ?? new Set<string>();
+    set.add(value.toLowerCase().replace(/^0+(?=\d)/, ''));
+    values.set(kind, set);
+  };
+  const id = /\b(interchange(?:\s+ic)?|ic|bridge|br|zone|ramp|loop|section|pier|abutment)\s*[-:.]?\s*(\d+[a-z]?|[a-z])\b/gi;
+  for (const m of text.matchAll(id)) {
+    const kind = m[1].toLowerCase();
+    add(kind === 'ic' || kind.startsWith('interchange') ? 'interchange' : kind === 'br' ? 'bridge' : kind, m[2]);
+  }
+  for (const m of text.matchAll(/\b(left|right)[ -]+(?:hand[ -]+)?side\b|\b(lhs|rhs)\b/gi)) add('side', (m[1] ?? m[2][0]).toLowerCase()[0]);
+  return values;
+}
 
-/** Parse "CH 5+000", "KM 5.0" or "5000" style stations from text, generically. Returns metres when recognisable. */
+/** Parse explicitly stated station values from common chainage and kilometre formats. */
 export function stationsIn(text: string): number[] {
   const out: number[] = [];
-  const re = /\b(?:ch|chainage|km|sta|station)?\.?\s*(\d{1,3})\s*\+\s*(\d{3})\b/gi;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) out.push(Number(m[1]) * 1000 + Number(m[2]));
+  for (const m of text.matchAll(/\b(\d{1,3})\s*\+\s*(\d{3})\b/gi)) out.push(Number(m[1]) * 1000 + Number(m[2]));
+  for (const m of text.matchAll(/\bkm\.?\s*(\d{1,3}(?:\.\d+)?)\b(?!\s*\+)/gi)) out.push(Math.round(Number(m[1]) * 1000));
   return out;
+}
+
+type Operation = 'install' | 'remove' | 'relocate' | 'procure' | 'test';
+function operationIn(text: string): Operation | null {
+  const t = canonical(text);
+  if (/\b(?:relocat\w*|divert\w*|diversion|reposition\w*)\b/.test(t)) return 'relocate';
+  if (/\b(?:remov\w*|demoli\w*|dismantl\w*|break[ -]?out|strip[ -]?out)\b/.test(t)
+    && !/\b(?:install\w*|construct\w*|laying|lay)\b/.test(t)) return 'remove';
+  if (/\b(?:procur\w*|purchase\w*|deliver\w*|fabricat\w*|material submittal\w*)\b/.test(t)
+    && !/\b(?:install\w*|construct\w*|laying|lay)\b/.test(t)) return 'procure';
+  if (/\b(?:as[ -]?built|commission\w*|testing|inspection)\b/.test(t)
+    && !/\b(?:install\w*|construct\w*|laying|lay)\b/.test(t)) return 'test';
+  if (/\b(?:instal\w*|construct\w*|erect\w*|laying|lay|fixing|fix|placement)\b/.test(t)) return 'install';
+  return null;
+}
+
+const ASSETS: [string, RegExp][] = [
+  ['barrier transition', /\b(?:barrier|guardrail)(?:\s+[a-z]+){0,4}\s+transition\w*\b|\btransition\w*(?:\s+[a-z]+){0,4}\s+(?:barrier|guardrail)\b/],
+  ['crash cushion', /\bcrash cushion\b/],
+  ['end terminal', /\b(?:end terminals?|crashworthy terminals?)\b/],
+  ['guardrail', /\bguardrail\b|\b(?:roadside barrier|vehicle restraint system|road restraint system)\w*\b/],
+  ['recycled water', /\brecycled water\b|\b(?:tse|treated sewage effluent)\b/],
+  ['irrigation', /\birrigation\b/],
+  ['potable water', /\b(?:potable|drinking) water\b/],
+  ['stormwater', /\bstorm[ -]?water\b|\bstorm drainage\b/],
+  ['sewer', /\b(?:sewer\w*|foul water|wastewater)\b/],
+];
+const BARRIER_SUBTYPES = ['barrier transition', 'crash cushion', 'end terminal', 'guardrail'];
+const UTILITIES = ['recycled water', 'irrigation', 'potable water', 'stormwater', 'sewer'];
+function assetsIn(text: string): Set<string> {
+  const t = canonical(text);
+  const tags = new Set(ASSETS.filter(([, pattern]) => pattern.test(t)).map(([name]) => name));
+  if (tags.has('barrier transition') || tags.has('end terminal')) tags.delete('guardrail');
+  return tags;
+}
+function specsIn(text: string): Map<string, Set<string>> {
+  const specs = new Map<string, Set<string>>();
+  const set = (name: string, val: string) => {
+    const values = specs.get(name) ?? new Set<string>();
+    values.add(val.toLowerCase());
+    specs.set(name, values);
+  };
+  for (const m of text.matchAll(/\bTL\s*[- ]?\s*([1-6])\b/gi)) set('test level', m[1]);
+  for (const m of text.matchAll(/(?:[Øø⌀%]|\bDN\s*|\bdiameter\s+)(\d{2,4})\s*(?:mm)?\b/gi)) set('diameter', m[1]);
+  for (const m of text.matchAll(/\b(HDPE|uPVC|PVC|GRP|ductile iron)\b/gi)) set('material', m[1]);
+  return specs;
+}
+
+interface MatchEvidence { violations: string[]; review: string[]; reasons: string[]; bonus: number }
+function evidenceFor(line: WorkLine, a: ScheduleActivity): MatchEvidence {
+  const primary = [line.name, line.workType, line.description, line.specification].join(' ');
+  const tags = assetsIn(primary);
+  // Positive evidence can come from the activity, its WBS or its local codes. A project's title
+  // (the top WBS) is not location/work evidence for all of its individual tasks.
+  const path = (a.wbsPath?.length ? a.wbsPath : a.wbs.split(' / '));
+  const entries = Object.entries(a.activityCodes ?? {});
+  const costCodes = entries.filter(([key]) => /\bcost\b|\bboq\b|\bbudget\b/i.test(key)).map(([,v]) => v).join(' ');
+  const codes = entries.filter(([key]) => !/\bcost\b|\bboq\b|\bbudget\b/i.test(key)).map(([,v]) => v).join(' ');
+  const contextPath = path.length > 1 ? path.slice(1).join(' / ') : (path[0] ?? '');
+  const locText = [a.name, contextPath, codes, a.zone, ...Object.values(a.udf ?? {})].join(' ');
+  const localScope = assetsIn([a.name, contextPath, codes].join(' '));
+  const ownScope = assetsIn(a.name);
+  const intersect = (a: Iterable<string>, b: Set<string>) => [...a].some((x) => b.has(x));
+  const e: MatchEvidence = { violations: [], review: [], reasons: [], bonus: 0 };
+  const op = operationIn(primary);
+  const actOp = operationIn(a.name);
+  if (actOp && op && actOp !== op) {
+    if (['remove', 'procure', 'test'].includes(actOp) || (actOp === 'install' && ['remove', 'test', 'procure'].includes(op))) {
+      e.violations.push(`Activity is ${actOp} work, but this change concerns ${op} work.`);
+    } else {
+      e.review.push(`Confirm that this ${actOp} activity can carry the ${op} scope, rather than relying on a different existing operation.`);
+    }
+  } else if (!op && actOp === 'remove' && line.action !== 'omit') {
+    e.violations.push('Activity removes existing assets; it does not install or add this work.');
+  } else if (op && actOp === op) {
+    e.bonus += 1;
+    e.reasons.push(`execution action matches: ${op}`);
+  }
+  // A commercial omission may remove planned installation from scope, which is not site demolition.
+  if (line.action === 'omit' && !op && actOp === 'remove') {
+    e.review.push('Confirm this is physical removal, not an omission of planned installation.');
+  }
+
+  const targetBarrier = BARRIER_SUBTYPES.filter((x) => tags.has(x));
+  const ownBarrier = new Set(BARRIER_SUBTYPES.filter((x) => ownScope.has(x)));
+  if (targetBarrier.length && ownBarrier.size && !intersect(targetBarrier, ownBarrier))
+    e.violations.push(`Activity describes a different roadside asset (${[...ownBarrier].join(', ')}).`);
+
+  const targetUtility = UTILITIES.filter((x) => tags.has(x));
+  const ownUtility = new Set(UTILITIES.filter((x) => ownScope.has(x)));
+  const contextUtility = new Set(UTILITIES.filter((x) => localScope.has(x)));
+  const utility = ownUtility.size ? ownUtility : contextUtility;
+  if (targetUtility.length && utility.size && !intersect(targetUtility, utility))
+    e.violations.push(`Activity describes a different utility (${[...utility].join(', ')}).`);
+  const genericPipeCarrier = /\b(?:pipe\w*|irrigat\w*|water (?:main|line|network|supply))\b/.test(canonical(a.name));
+  if (targetUtility.length && !genericPipeCarrier && !ownUtility.size)
+    e.violations.push('The activity has no utility installation, relocation or pipe scope of its own.');
+  else if (targetUtility.length && genericPipeCarrier && !ownUtility.size)
+    e.reasons.push('possible utility activity; service needs verification');
+  if (targetBarrier.length && !ownBarrier.size)
+    e.violations.push('The activity does not describe the required roadside asset in its work scope.');
+  const requiredAssets = tags.has('recycled water') ? [...tags].filter((x) => x !== 'irrigation') : [...tags];
+  for (const asset of requiredAssets) {
+    if (localScope.has(asset)) { e.bonus += 0.65; e.reasons.push(`scope evidenced: ${asset}`); }
+    else e.review.push(`No evidence that this activity covers ${asset}.`);
+  }
+
+  const targetLoc = locationsIn(line.location);
+  const inlineLoc = locationsIn(`${line.name} ${line.description}`);
+  for (const [kind, vals] of inlineLoc) if (!targetLoc.has(kind)) targetLoc.set(kind, vals);
+  const activityLoc = locationsIn(locText);
+  const costLoc = locationsIn(costCodes);
+  let actualLocationMatch = false;
+  for (const [kind, requested] of targetLoc) {
+    const actual = activityLoc.get(kind);
+    if (!actual?.size) {
+      const commercial = costLoc.get(kind);
+      if (commercial && intersect(requested, commercial)) {
+        e.bonus += 0.8;
+        e.reasons.push(`related cost area: ${kind} ${[...requested].join(', ')}`);
+        e.review.push(`Only the cost code indicates ${kind} ${[...requested].join(', ')}; verify the work location.`);
+      } else e.review.push(`The schedule activity does not confirm ${kind} ${[...requested].join(', ')}.`);
+    }
+    else if (!intersect(requested, actual))
+      e.violations.push(`Different ${kind}: change ${[...requested].join(', ')}, activity ${[...actual].join(', ')}.`);
+    else if (actual.size > 1 || (requested.size > 1 && [...requested].some((x) => !actual.has(x))))
+      e.review.push(`Multiple ${kind} values are stated; verify the exact work location and any quantity split.`);
+    else { actualLocationMatch = true; e.bonus += 1.6; e.reasons.push(`same ${kind}: ${[...requested].join(', ')}`); }
+  }
+  const range = (v: number[]) => [Math.min(...v), Math.max(...v)];
+  const lineStations = stationsIn(`${line.location} ${line.description} ${line.name}`);
+  if (lineStations.length) {
+    const actual = stationsIn(locText);
+    if (!actual.length) e.review.push('No activity chainage is stated.');
+    else {
+      const [a, b] = range(actual); const [l, h] = range(lineStations);
+      if (h < a || l > b) e.violations.push('The stated chainage does not overlap the activity range.');
+      else if (l < a || h > b) e.review.push('This activity only covers part of the stated chainage; a measured split is required.');
+      else { e.bonus += 1.2; e.reasons.push('Stated chainage is covered by the activity.'); }
+    }
+  }
+  if (line.location.trim() && !targetLoc.size && !lineStations.length) {
+    const requested = tokens(line.location).map(stem);
+    const actual = new Set(tokens(locText).map(stem));
+    if (requested.length && !requested.every((x) => actual.has(x)))
+      e.review.push(`The schedule activity does not confirm location "${line.location}".`);
+  }
+  if (targetLoc.size && !actualLocationMatch && requiredAssets.length && !intersect(requiredAssets, localScope))
+    e.violations.push('Neither the specified asset nor the work location is evidenced by this activity.');
+  const actualSpecs = specsIn([a.name, contextPath, codes].join(' '));
+  for (const [kind, requested] of specsIn(primary)) {
+    const actual = actualSpecs.get(kind);
+    if (!actual?.size)
+      e.review.push(`Activity does not confirm the ${kind} (${[...requested].join(', ')}).`);
+    else if (!intersect(requested, actual))
+      e.violations.push(`Different ${kind}: change ${[...requested].join(', ')}, activity ${[...actual].join(', ')}.`);
+    else if (actual.size > 1 || requested.size > 1)
+      e.review.push(`Multiple ${kind} values are stated; confirm which scope the activity represents.`);
+    else { e.bonus += 0.6; e.reasons.push(`same ${kind}: ${[...requested].join(', ')}`); }
+  }
+  return e;
 }
 
 export interface ActivityBrief {
@@ -133,6 +313,8 @@ export interface Candidate {
   reasons: string[];
   /** Hard rules that make this a poor target. Valid candidates have none. */
   violations: string[];
+  /** Missing scope/location evidence: keep shortlisted, but never allocate automatically. */
+  review: string[];
   /** Soft warnings that do not disqualify. */
   cautions: string[];
   eligible: boolean;
@@ -143,25 +325,23 @@ export interface Candidate {
 export interface RetrievalOptions { limit?: number; broaden?: boolean }
 
 /**
- * Retrieve and rank candidates for one line across the entire schedule. If the strict pass yields nothing useful
- * (thin metadata), a broadened pass relaxes location and WBS requirements and says so in the reasons.
+ * Retrieve and rank candidates for one line across the entire schedule. The broader shortlist
+ * may include weaker candidates for review but never bypasses an action, scope or location check.
  */
 export function retrieveActivities(line: WorkLine, model: ScheduleModel, opts: RetrievalOptions = {}): { candidates: Candidate[]; broadened: boolean } {
   const limit = opts.limit ?? 6;
-  const strict = rank(line, model, false);
-  const goodStrict = strict.filter((c) => c.eligible && c.score >= 2.2);
-  if (goodStrict.length > 0 && !opts.broaden) return { candidates: strict.slice(0, limit), broadened: false };
-  const wide = rank(line, model, true);
-  return { candidates: wide.slice(0, limit), broadened: true };
+  const ranked = rank(line, model);
+  if (!opts.broaden && ranked.some((c) => c.eligible && c.review.length === 0 && c.score >= MED))
+    return { candidates: ranked.filter((c) => c.score > 0.5).slice(0, limit), broadened: false };
+  return { candidates: ranked.slice(0, limit), broadened: true };
 }
 
-function rank(line: WorkLine, model: ScheduleModel, broad: boolean): Candidate[] {
+function rank(line: WorkLine, model: ScheduleModel): Candidate[] {
   const queryText = [line.name, line.description, line.workType, line.specification, ...line.searchTerms].join(' ');
   const qTok = Array.from(new Set(tokens(queryText).map(stem)));
   const qGroups = groupsOf(tokens(queryText));
   const linePhase = phaseOf(`${line.name} ${line.workType} ${line.description}`);
-  const locTok = locationTokens(line.location);
-  const lineStations = stationsIn(`${line.location} ${line.description} ${line.name}`);
+
   const out: Candidate[] = [];
 
   for (const a of model.activities) {
@@ -194,21 +374,10 @@ function rank(line: WorkLine, model: ScheduleModel, broad: boolean): Candidate[]
       }
     }
 
-    // Location: generic token overlap, then numeric station overlap when both sides state stations.
-    if (locTok.length) {
-      const hits = locTok.filter((t) => ownTok.has(stem(t)) || ctxTok.has(stem(t)));
-      if (hits.length) { score += Math.min(1.4, hits.length * 0.5); reasons.push(`location terms match: ${hits.slice(0, 3).join(', ')}`); }
-      else if (!broad) { score -= 0.4; }
-    }
-    if (lineStations.length) {
-      const actStations = stationsIn(`${a.name} ${a.wbs}`);
-      if (actStations.length >= 2) {
-        const lo = Math.min(...actStations); const hi = Math.max(...actStations);
-        const inside = lineStations.some((s) => s >= lo && s <= hi);
-        if (inside) { score += 1.2; reasons.push('stated chainage falls within the activity range'); }
-        else if (!broad) { score -= 0.8; cautions.push('activity covers a different stated chainage range'); }
-      }
-    }
+    const evidence = evidenceFor(line, a);
+    score += evidence.bonus;
+    reasons.push(...evidence.reasons);
+    violations.push(...evidence.violations);
 
     // Hard validation: kind and completion.
     const kindBlock = line.executes ? cannotReceiveExecution(b) : null;
@@ -220,11 +389,12 @@ function rank(line: WorkLine, model: ScheduleModel, broad: boolean): Candidate[]
     // A handover-phase activity never matches an execution operation.
     if (line.executes && b.phase === 'handover' && linePhase !== 'handover') { if (!violations.length) violations.push('It is a handover/completion activity, not an execution activity.'); }
 
-    if (score <= 0.5 && !broad) continue;
+    const workEvidence = exact.length > 0 || syn.length > 0 || evidence.reasons.some((r) => r.startsWith('scope evidenced:') || r.startsWith('possible utility activity'));
+    if (!workEvidence) continue;  // Location or generic phase alone is not an activity match.
     if (score <= 0.2) continue;
-    out.push({ activity: b, score: Math.round(score * 100) / 100, reasons, violations, cautions, eligible: violations.length === 0 && !completed, completed });
+    out.push({ activity: b, score: Math.round(score * 100) / 100, reasons, violations, review: evidence.review, cautions, eligible: violations.length === 0 && !completed, completed });
   }
-  return out.sort((x, y) => Number(y.eligible) - Number(x.eligible) || y.score - x.score || x.activity.code.localeCompare(y.activity.code));
+  return out.sort((x, y) => Number(y.eligible) - Number(x.eligible) || Number(x.review.length > 0) - Number(y.review.length > 0) || y.score - x.score || x.activity.code.localeCompare(y.activity.code));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -311,23 +481,27 @@ export function mapLine(line: WorkLine, model: ScheduleModel, choice?: MappingUs
   // User-forced targets are re-validated: a milestone or summary can never be accepted.
   if (choice?.activityTaskIds?.length) {
     const ok: Allocation[] = []; const rejected: string[] = [];
-    for (const tid of choice.activityTaskIds) {
+    for (const tid of new Set(choice.activityTaskIds)) {
       const a = byTask.get(tid);
       if (!a) { rejected.push(`${tid} is not in the imported schedule`); continue; }
-      const why = cannotReceiveExecution(briefOf(a));
+      const why = cannotReceiveExecution(briefOf(a)) ?? evidenceFor(line, a).violations[0];
       if (why) { rejected.push(`${a.id} ${a.name}: ${why}`); continue; }
-      if ((a.status ?? 'not_started') === 'completed') { rejected.push(`${a.id} ${a.name}: it is complete, so its actual dates and quantities are not changed. Propose a new activity instead.`); continue; }
+      if (briefOf(a).status === 'completed') { rejected.push(`${a.id} ${a.name}: it is complete, so its actual dates and quantities are not changed. Propose a new activity instead.`); continue; }
       ok.push({ activityTaskId: tid, activityCode: a.id, activityName: a.name, share: '0', quantity: null, basis: 'user' });
     }
-    if (ok.length) {
+    if (ok.length && !rejected.length) {
+      const percentages = ok.map((a) => Number(choice.shares?.[a.activityTaskId]));
+      if (ok.length > 1 && (percentages.some((x) => !Number.isFinite(x) || x <= 0) || Math.abs(percentages.reduce((sum, x) => sum + x, 0) - 100) > 0.000001)) {
+        return { ...base, state: 'needs_question', allocations: [], candidates, broadened, newActivity: null, explanation: 'Enter a supported allocation percentage for each selected activity, totaling 100%. No equal split is assumed.', question: null, downstream: [], confidence: 'low' };
+      }
       const allocs = allocate(ok, line.quantity, choice.shares);
-      return { ...base, state: 'accepted', allocations: allocs, candidates, broadened, newActivity: null, explanation: `Your selection${rejected.length ? ` (${rejected.length} rejected: ${rejected.join('; ')})` : ''}.`, question: null, downstream: downstreamOf(allocs.map((x) => x.activityTaskId), model), confidence: 'high' };
+      return { ...base, state: 'accepted', allocations: allocs, candidates, broadened, newActivity: null, explanation: 'Your selection.', question: null, downstream: downstreamOf(allocs.map((x) => x.activityTaskId), model), confidence: 'high' };
     }
     return { ...base, state: 'needs_question', allocations: [], candidates, broadened, newActivity: null, explanation: `Selection rejected: ${rejected.join('; ')}`, question: questionFor(line, candidates, 'The selected activity cannot take this work.'), downstream: [], confidence: 'low' };
   }
 
   const eligible = candidates.filter((c) => c.eligible);
-  const completedBest = candidates.find((c) => c.completed && !c.violations.length && c.score >= MED);
+  const completedBest = candidates.find((c) => c.completed && !c.violations.length && !c.review.length && c.score >= MED);
 
   if (choice?.wantsNewActivity) return newActivityMapping(line, model, base, candidates, broadened, completedBest, choice.newActivityName);
 
@@ -338,30 +512,29 @@ export function mapLine(line: WorkLine, model: ScheduleModel, choice?: MappingUs
     return {
       ...base, state: 'needs_question', allocations: [], candidates, broadened, newActivity: null,
       explanation: blocked ? `Best textual match ${blocked.activity.code} ${blocked.activity.name} cannot take the work: ${blocked.violations[0]}` : 'No activity in the imported schedule resembles this work.',
-      question: questionFor(line, candidates, blocked ? 'Only a milestone or summary row resembles this work.' : missingFor(line, model)),
-      downstream: blocked ? downstreamOf([blocked.activity.taskId], model) : [], confidence: 'low',
+      question: questionFor(line, candidates, blocked ? blocked.violations[0] : missingFor(line, model)),
+      downstream: [], confidence: 'low',
     };
   }
 
   const top = eligible[0];
-  const competing = eligible.filter((c) => c.score >= top.score - 0.4 && c.score >= MED);
-  // Several equally good eligible activities in the same WBS family => split the quantity explicitly; otherwise ask.
-  const sameFamily = competing.length > 1 && competing.every((c) => parentOf(c.activity.wbsPath) === parentOf(top.activity.wbsPath));
-  const confidence: LineMapping['confidence'] = top.score >= HIGH ? 'high' : top.score >= MED ? 'medium' : 'low';
+  const competing = eligible.filter((c) => !c.review.length && c.score >= top.score - 0.4 && c.score >= MED);
+  const confidence: LineMapping['confidence'] = !top.review.length && top.score >= HIGH ? 'high' : top.score >= MED ? 'medium' : 'low';
 
-  if (top.score < MED) {
-    return { ...base, state: 'needs_question', allocations: [], candidates, broadened, newActivity: null, explanation: `The closest candidate is ${top.activity.code} ${top.activity.name}, but the evidence is weak (${top.reasons.join('; ') || 'few shared terms'}).`, question: questionFor(line, candidates, missingFor(line, model)), downstream: [], confidence };
+  if (top.score < MED || top.review.length) {
+    const missing = top.review.join(' ') || missingFor(line, model);
+    return { ...base, state: 'needs_question', allocations: [], candidates, broadened, newActivity: null, explanation: `Closest candidate: ${top.activity.code} ${top.activity.name}. The evidence does not establish that it can receive this work.`, question: questionFor(line, candidates, missing), downstream: [], confidence };
   }
-  if (competing.length > 1 && !sameFamily) {
-    return { ...base, state: 'needs_question', allocations: [], candidates, broadened, newActivity: null, explanation: `${competing.length} activities fit equally well and sit in different parts of the WBS: ${competing.map((c) => c.activity.code).join(', ')}.`, question: questionFor(line, candidates, 'Location or WBS does not separate these activities. State which area the change is in, or choose.'), downstream: [], confidence: 'low' };
+  if (competing.length > 1) {
+    return { ...base, state: 'needs_question', allocations: [], candidates, broadened, newActivity: null, explanation: `Several activities fit equally well: ${competing.map((c) => c.activity.code).join(', ')}. The tool has not split or duplicated the quantity.`, question: questionFor(line, candidates, 'Confirm the exact work section or a measured quantity split; shared WBS does not imply equal work.'), downstream: [], confidence: 'low' };
   }
 
-  const chosen = sameFamily ? competing : [top];
+  const chosen = [top];
   const allocs = allocate(chosen.map((c) => ({ activityTaskId: c.activity.taskId, activityCode: c.activity.code, activityName: c.activity.name, share: '0', quantity: null, basis: 'automatic' as const })), line.quantity);
   const cautions = chosen.flatMap((c) => c.cautions);
   return {
     ...base, state: 'proposed', allocations: allocs, candidates, broadened, newActivity: null,
-    explanation: `${chosen.map((c) => `${c.activity.code} ${c.activity.name}`).join(' and ')}: ${top.reasons.join('; ')}.${broadened ? ' Retrieval was broadened because location/WBS metadata was missing.' : ''}${cautions.length ? ` Note: ${cautions[0]}` : ''}`,
+    explanation: `${chosen.map((c) => `${c.activity.code} ${c.activity.name}`).join(' and ')}: ${top.reasons.join('; ')}.${broadened ? ' Broader search still applied the work and location checks.' : ''}${cautions.length ? ` Note: ${cautions[0]}` : ''}`,
     question: null, downstream: downstreamOf(chosen.map((c) => c.activity.taskId), model), confidence,
   };
 }
@@ -369,8 +542,6 @@ export function mapLine(line: WorkLine, model: ScheduleModel, choice?: MappingUs
 function labelState(s: NonNullable<MappingUserChoice['state']>): string {
   return s === 'deferred' ? 'Deferred' : s === 'excluded' ? 'Excluded from schedule assessment' : 'Not applicable';
 }
-
-const parentOf = (path: string) => path.split(' / ').slice(0, -1).join(' / ');
 
 function missingFor(line: WorkLine, model: ScheduleModel): string {
   const bits: string[] = [];
@@ -381,7 +552,7 @@ function missingFor(line: WorkLine, model: ScheduleModel): string {
 }
 
 function questionFor(line: WorkLine, candidates: Candidate[], missing: string): Question {
-  const opts = candidates.filter((c) => c.eligible).slice(0, 4).map((c) => ({ id: `act:${c.activity.taskId}`, label: `${c.activity.code} ${c.activity.name} (${c.activity.wbsPath || 'no WBS'})`, activityTaskId: c.activity.taskId }));
+  const opts = candidates.filter((c) => c.eligible).slice(0, 4).map((c) => ({ id: `act:${c.activity.taskId}`, label: `${c.review.length ? 'Select after verifying: ' : ''}${c.activity.code} ${c.activity.name} (${c.activity.wbsPath || 'no WBS'})`, activityTaskId: c.activity.taskId }));
   return {
     id: `q-${line.lineId}`, lineId: line.lineId, title: `Which activity carries “${line.name}”?`, missing,
     options: [...opts, { id: 'new', label: 'None - propose a new activity' }, { id: 'defer', label: 'Not sure - defer and continue' }],
@@ -389,7 +560,8 @@ function questionFor(line: WorkLine, candidates: Candidate[], missing: string): 
 }
 
 function newActivityMapping(line: WorkLine, model: ScheduleModel, base: { lineId: string; componentId: string; name: string }, candidates: Candidate[], broadened: boolean, anchor: Candidate | undefined, name?: string): LineMapping {
-  const near = anchor ?? candidates.find((c) => !c.violations.length) ?? candidates[0];
+  const plausible = candidates.filter((c) => !c.violations.length && !c.review.length && c.score >= MED);
+  const near = anchor ?? (plausible.length === 1 || (plausible[0] && plausible[1] && plausible[0].score - plausible[1].score > 0.4) ? plausible[0] : undefined);
   const proposal = buildNewActivity(line, model, near?.activity, name);
   return {
     ...base, state: 'new_activity', allocations: [], candidates, broadened, newActivity: proposal,
@@ -434,15 +606,20 @@ export function allocate(targets: Allocation[], quantity: string | null, shares?
 
 function downstreamOf(taskIds: string[], model: ScheduleModel): LineMapping['downstream'] {
   const byTask = new Map(model.activities.map((a) => [a.taskId ?? a.id, a]));
+  const successors = new Map<string, string[]>();
+  for (const r of model.relationships) {
+    if (r.resolved === false || !r.fromTaskId || !r.toTaskId) continue;
+    const adjacent = successors.get(r.fromTaskId) ?? [];
+    adjacent.push(r.toTaskId);
+    successors.set(r.fromTaskId, adjacent);
+  }
   const seen = new Set<string>(taskIds);
   const out: LineMapping['downstream'] = [];
   const queue = [...taskIds];
   let guard = 0;
   while (queue.length && guard++ < 5000) {
     const cur = queue.shift() as string;
-    for (const r of model.relationships) {
-      if (r.fromTaskId !== cur || r.resolved === false) continue;
-      const to = r.toTaskId as string;
+    for (const to of successors.get(cur) ?? []) {
       if (seen.has(to)) continue;
       seen.add(to);
       const a = byTask.get(to);

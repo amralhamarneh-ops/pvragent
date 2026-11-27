@@ -1,3 +1,5 @@
+import { isProcessedPvrFile } from './processedReference';
+
 export type FileRole = 'pvr' | 'correspondence' | 'drawings' | 'boq' | 'schedule' | 'contract' | 'site' | 'reference' | 'unused';
 
 export const ROLE_LABEL: Record<FileRole, string> = {
@@ -58,6 +60,7 @@ export function classifyOne(f: IncomingFile): ClassifiedFile {
   const path = f.path.toLowerCase();
   const mk = (role: FileRole, reason: string, detail?: string): ClassifiedFile => ({ ...f, name, role, reason, detail });
   if (lower.startsWith('~$') || lower.endsWith('.tmp') || lower === 'thumbs.db' || lower === '.ds_store') return mk('unused', 'Temporary file created by Excel or the system');
+  if (isProcessedPvrFile(name)) return mk('reference', 'Processed PVR (comparison only)');
   if (/\.xer$/.test(lower)) return mk('schedule', 'Primavera P6 schedule export');
   if (/\.(dxf|dwg)$/.test(lower)) return mk('drawings', lower.endsWith('.dwg') ? 'DWG drawing (needs a converter or a DXF copy)' : 'DXF drawing');
   if (/(pvr|change[-_ ]?request|variation[-_ ]?request)/.test(lower) && /\.(pdf|docx?|txt)$/.test(lower)) return mk('pvr', 'Named as a change request');

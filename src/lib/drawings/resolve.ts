@@ -33,8 +33,8 @@ export function resolutionsFrom(questions: AnalysisQuestion[], answers: Record<s
         break;
       case 'unit':
         if (a === 'm' || a === 'mm' || a === 'cm') {
-          // The unit question lists both drawing file names as evidence; the confirmed unit applies to each.
-          for (const e of q.evidence) r.unitOverride[e] = a;
+          // The unit question lists only the drawing whose unit the reviewer confirmed.
+          if (q.evidence.length === 1) r.unitOverride[q.evidence[0]] = a;
         } else if (a === 'later') r.held.push(q.id);
         break;
       case 'conflict':

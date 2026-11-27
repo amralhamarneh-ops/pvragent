@@ -277,11 +277,17 @@ export function calculateCpm(net: CpmNetwork): CpmResult {
   const issues = [...report.issues];
   const empty: CpmResult = { ok: false, activities: {}, projectFinish: null, criticalPath: [], issues, order: [] };
   if (report.hasErrors) return empty;
+  if (!net.activities.length) { issues.push({ severity: 'error', code: 'EMPTY_NETWORK', message: 'There are no activities to schedule.' }); return empty; }
 
   const cals = new Map(net.calendars.map((c) => [c.id, new CalendarIndex(c)]));
   const byId = new Map(net.activities.map((a) => [a.id, a]));
   const cal = (id: string) => cals.get(byId.get(id)?.calendarId as string) as CalendarIndex;
   const order = topoOrder(net);
+  // A start milestone is at the opening of its day, and a finish milestone
+  // at the closing of its day. An FS tie to/from the appropriate boundary
+  // consumes no extra day. Ordinary work-to-work FS still enters next day.
+  const fsBoundary = (from: string, to: string) =>
+    byId.get(from)?.type === 'milestone_start' || byId.get(to)?.type === 'milestone_finish' ? 0 : 1;
   const incoming = new Map<string, CpmRelationship[]>();
   const outgoing = new Map<string, CpmRelationship[]>();
   for (const a of net.activities) { incoming.set(a.id, []); outgoing.set(a.id, []); }
@@ -315,7 +321,7 @@ export function calculateCpm(net: CpmNetwork): CpmResult {
     for (const r of incoming.get(id) ?? []) {
       const p = early.get(r.from) as Dates;
       if (r.type === 'FS') {
-        bump(shiftLag(c, c.nextWork(addDays(p.f, 1)), r.lag), r.from, false);
+        bump(shiftLag(c, c.nextWork(addDays(p.f, fsBoundary(r.from, r.to))), r.lag), r.from, false);
       } else if (r.type === 'SS') {
         bump(shiftLag(c, c.nextWork(p.s), r.lag), r.from, false);
       } else if (r.type === 'FF') {
@@ -366,8 +372,8 @@ export function calculateCpm(net: CpmNetwork): CpmResult {
   }
 
   // ---------- Project finish ----------
-  const open = net.activities.filter((a) => (outgoing.get(a.id) ?? []).length === 0);
-  const finishes = (open.length ? open : net.activities).map((a) => (early.get(a.id) as Dates).f);
+  // SS/SF links can leave a predecessor finishing after a leaf.
+  const finishes = net.activities.map((a) => (early.get(a.id) as Dates).f);
   const projectFinish = finishes.reduce((m, f) => (toUtc(f) > toUtc(m) ? f : m), finishes[0]);
   const lfTarget = net.targetFinish && toUtc(net.targetFinish) > toUtc(projectFinish) ? net.targetFinish : projectFinish;
 
@@ -386,7 +392,7 @@ export function calculateCpm(net: CpmNetwork): CpmResult {
       const sl = late.get(r.to) as Dates;
       const sc = cal(r.to);
       if (r.type === 'FS') {
-        tightenF(c.prevWork(addDays(shiftLag(sc, sc.prevWork(sl.s), -r.lag), -1)));
+        tightenF(c.prevWork(addDays(shiftLag(sc, sc.prevWork(sl.s), -r.lag), -fsBoundary(r.from, r.to))));
       } else if (r.type === 'SS') {
         tightenS(c.prevWork(shiftLag(sc, sc.prevWork(sl.s), -r.lag)));
       } else if (r.type === 'FF') {
@@ -395,9 +401,11 @@ export function calculateCpm(net: CpmNetwork): CpmResult {
         tightenS(c.prevWork(addDays(shiftLag(sc, sc.prevWork(sl.f), -r.lag), 1)));
       }
     }
-    let lf: string | null = lim.lf;
+    // Project finish bounds all activity finishes, even if the only
+    // outgoing logic constrains the start (e.g. SS).
+    const latestProjectDay = c.prevWork(lfTarget);
+    let lf: string | null = lim.lf !== null && toUtc(lim.lf) < toUtc(latestProjectDay) ? lim.lf : latestProjectDay;
     let ls: string | null = lim.ls;
-    if ((outgoing.get(id) ?? []).length === 0) lf = c.prevWork(lfTarget);
     if (a.constraint && (a.constraint.type === 'FNLT' || a.constraint.type === 'MFO')) {
       const cf = c.prevWork(a.constraint.date);
       if (lf === null || toUtc(cf) < toUtc(lf)) lf = cf;
@@ -435,7 +443,7 @@ export function calculateCpm(net: CpmNetwork): CpmResult {
       const vals = outs.map((r) => {
         const sa = early.get(r.to) as Dates;
         const sc = cal(r.to);
-        if (r.type === 'FS') return sc.workDiff(shiftLag(sc, sc.nextWork(addDays(e.f, 1)), r.lag), sa.s);
+        if (r.type === 'FS') return sc.workDiff(shiftLag(sc, sc.nextWork(addDays(e.f, fsBoundary(r.from, r.to))), r.lag), sa.s);
         if (r.type === 'SS') return sc.workDiff(shiftLag(sc, sc.nextWork(e.s), r.lag), sa.s);
         if (r.type === 'FF') return sc.workDiff(shiftLag(sc, sc.prevWork(e.f), r.lag), sa.f);
         return sc.workDiff(shiftLag(sc, sc.prevWork(addDays(e.s, -1)), r.lag), sa.f);
@@ -449,7 +457,7 @@ export function calculateCpm(net: CpmNetwork): CpmResult {
   }
 
   // Critical path: trace driving predecessors back from the finishing critical activities.
-  const crit = net.activities.filter((a) => results[a.id].critical).map((a) => a.id);
+  const crit = order.filter(id => results[id].critical);
   issues.push({ severity: 'limitation', code: 'ENGINE_SCOPE', message: 'Embedded engine: retained logic, declared calendars, no resource levelling. Not asserted to equal P6 until the unchanged-copy comparison is accepted by a planner.' });
   return { ok: true, activities: results, projectFinish, criticalPath: crit, issues, order };
 }

@@ -13,6 +13,23 @@ import type {
 
 interface XerTable { fields: string[]; rows: string[][] }
 
+/** Read the same file bytes in every case entry point. Legacy XERs frequently omit a Unicode BOM. */
+export function parseXerBytes(bytes: Uint8Array, fileName = 'schedule.xer'): ScheduleModel {
+  const bomEncoding = bytes[0] === 0xff && bytes[1] === 0xfe ? 'utf-16le'
+    : bytes[0] === 0xfe && bytes[1] === 0xff ? 'utf-16be' : null;
+  if (bomEncoding || (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf)) {
+    return parseXer(new TextDecoder(bomEncoding ?? 'utf-8', { fatal: true }).decode(bytes), fileName);
+  }
+  let content: string;
+  try { content = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+  catch {
+    const model = parseXer(new TextDecoder('windows-1252').decode(bytes), fileName);
+    model.warnings?.push('This XER is not valid UTF-8; decoded as Windows-1252. Verify special characters if the export used another code page.');
+    return model;
+  }
+  return parseXer(content, fileName);
+}
+
 /**
  * Parse the tables of a Primavera XER file (tab-delimited).
  *
@@ -24,18 +41,39 @@ interface XerTable { fields: string[]; rows: string[][] }
  */
 export function parseXer(text: string, fileName = 'schedule.xer'): ScheduleModel {
   const tables = new Map<string, XerTable>();
+  const integrityProblems: string[] = [];
+  const warnings: string[] = [];
   let current: XerTable | null = null;
-  for (const raw of text.split(/\r?\n/)) {
-    if (raw.startsWith('%T')) {
+  let currentName = '';
+  let ended = false;
+  let header = false;
+  let malformed = 0;
+  if (text.includes('\0')) throw new Error('File contains binary data or a Unicode encoding without a recognized byte-order mark.');
+  for (const raw of text.replace(/^\uFEFF/, '').split(/\r\n|\n|\r/)) {
+    const [tag, ...parts] = raw.split('\t');
+    if (tag === 'ERMHDR') header = true;
+    if (ended && (tag === '%T' || tag === '%F' || tag === '%R')) { malformed++; continue; }
+    if (tag === '%T') {
+      currentName = parts[0]?.trim() ?? '';
       current = { fields: [], rows: [] };
-      tables.set(raw.split('\t')[1]?.trim() ?? '', current);
-    } else if (raw.startsWith('%F') && current) {
-      current.fields = raw.split('\t').slice(1).map((f) => f.trim());
-    } else if (raw.startsWith('%R') && current) {
-      current.rows.push(raw.split('\t').slice(1));
+      if (!currentName || tables.has(currentName)) {
+        integrityProblems.push(currentName ? `Duplicate XER table: ${currentName}.` : 'XER contains an unnamed table.');
+        current = null;
+      } else tables.set(currentName, current);
+    } else if (tag === '%F' && current) {
+      const fields = parts.map(f => f.trim());
+      if (current.fields.length || new Set(fields).size !== fields.length || fields.some(f => !f)) {
+        integrityProblems.push(`Invalid or repeated field header in ${currentName}.`);
+      } else current.fields = fields;
+    } else if (tag === '%R') {
+      if (current?.fields.length) current.rows.push(parts);
+      else malformed++;
+    } else if (tag === '%E') {
+      ended = true;
     }
   }
-  const warnings: string[] = [];
+  if (header && !ended) integrityProblems.push('The XER export has no end marker and may be truncated.');
+  if (malformed) integrityProblems.push(`${malformed} XER row(s) have no valid field header or occur after the end marker.`);
   const idx = new Map<string, Map<string, number>>();
   const index = (t: string): Map<string, number> => {
     let m = idx.get(t);
@@ -135,11 +173,19 @@ export function parseXer(text: string, fileName = 'schedule.xer'): ScheduleModel
   const hoursToDays = (h: number | null, hpd: number | null): number => (h === null || hpd === null || hpd <= 0 ? 0 : Math.round((h / hpd) * 100) / 100);
   const missingHpd = new Set<string>();
   const taskRows = rowsOf('TASK');
+  const taskIdentityCounts = new Map<string, number>();
+  for (const r of taskRows) {
+    const id = col('TASK', r, 'task_id');
+    taskIdentityCounts.set(id, (taskIdentityCounts.get(id) ?? 0) + 1);
+  }
+  if ([...taskIdentityCounts].some(([id, count]) => !id || count > 1)) {
+    integrityProblems.push('The TASK table has blank or duplicate internal activity IDs.');
+  }
   const activities: ScheduleActivity[] = taskRows.map((r) => {
     const taskId = col('TASK', r, 'task_id');
     const cal = calById.get(col('TASK', r, 'clndr_id'));
     const hpd = cal?.hoursPerDay ?? null;
-    if (hpd === null) missingHpd.add(cal?.name || col('TASK', r, 'clndr_id') || '(no calendar)');
+    if (hpd === null || hpd <= 0) missingHpd.add(cal?.name || col('TASK', r, 'clndr_id') || '(no calendar)');
     const rawType = col('TASK', r, 'task_type');
     const rawStatus = col('TASK', r, 'status_code');
     const durH = num(col('TASK', r, 'target_drtn_hr_cnt'));
@@ -202,29 +248,37 @@ export function parseXer(text: string, fileName = 'schedule.xer'): ScheduleModel
   // ---- Relationships: resolved on internal task ids ----
   const byTaskId = new Map(activities.map((a) => [a.taskId as string, a]));
   let unresolved = 0;
+  let invalidRelationships = 0;
   const relationships: ScheduleRelationship[] = rowsOf('TASKPRED').map((r) => {
     const succId = col('TASKPRED', r, 'task_id');
     const predId = col('TASKPRED', r, 'pred_task_id');
     const pred = byTaskId.get(predId);
     const succ = byTaskId.get(succId);
     const lagH = num(col('TASKPRED', r, 'lag_hr_cnt'));
-    // Lag days use the successor's calendar, as P6 does by default.
+    // Lag days are a display conversion; the P6 source setting may use another basis.
     const hpd = succ?.hoursPerDay ?? null;
-    const resolved = !!pred && !!succ;
-    if (!resolved) unresolved += 1;
-    const t = col('TASKPRED', r, 'pred_type').replace('PR_', '');
+    const endpoints = !!pred && !!succ && !!predId && !!succId &&
+      taskIdentityCounts.get(predId) === 1 && taskIdentityCounts.get(succId) === 1;
+    if (!endpoints) unresolved++;
+    const sourceType = col('TASKPRED', r, 'pred_type');
+    const t = sourceType.replace(/^PR_/, '');
+    const valid = ['FS', 'SS', 'FF', 'SF'].includes(t) && lagH !== null;
+    if (!valid) invalidRelationships++;
     return {
       from: pred?.id ?? predId,
       to: succ?.id ?? succId,
       type: (['FS', 'SS', 'FF', 'SF'].includes(t) ? t : 'FS') as ScheduleRelationship['type'],
       lag: hoursToDays(lagH, hpd),
-      lagHours: lagH ?? 0,
+      lagHours: lagH ?? undefined,
+      rawType: sourceType,
       fromTaskId: predId,
       toTaskId: succId,
-      resolved,
+      resolved: endpoints && valid,
     };
   });
-  if (unresolved > 0) warnings.push(`${unresolved} relationship(s) point at tasks that are not in the TASK table and are kept as unresolved.`);
+  if (unresolved > 0) warnings.push(`${unresolved} relationship(s) have missing or ambiguous endpoints and are kept as unresolved.`);
+
+  if (invalidRelationships) warnings.push(`${invalidRelationships} relationship(s) have an unsupported type or missing/invalid lag and are excluded from logic. Raw source rows are retained.`);
 
   // ---- Productivity / resource fields actually present ----
   if (has('TASK', 'target_work_qty') || has('TASK', 'target_equip_qty')) {
@@ -240,7 +294,7 @@ export function parseXer(text: string, fileName = 'schedule.xer'): ScheduleModel
   return {
     rawTables: Object.fromEntries(tables),
     fileName, activityCount: activities.length, dataDate, activities, relationships, wbs, calendars, resources,
-    activityCodeTypes: Array.from(actvTypes.values()), udfTypes: Array.from(udfTypes.values()), productivityFields, warnings, tablesFound: Array.from(tables.keys()),
+    activityCodeTypes: Array.from(actvTypes.values()), udfTypes: Array.from(udfTypes.values()), productivityFields, warnings: [...integrityProblems, ...warnings], integrityProblems, tablesFound: Array.from(tables.keys()),
   };
 }
 
@@ -275,6 +329,7 @@ function extractCalendarExceptions(data: string): string[] {
   while ((m = re.exec(block)) !== null) {
     // P6 stores exception dates as days since 1899-12-30.
     const dt = new Date(Date.UTC(1899, 11, 30) + Number(m[1]) * 86400000);
+    if (!Number.isFinite(dt.getTime())) continue;
     out.push(dt.toISOString().slice(0, 10));
   }
   return out;

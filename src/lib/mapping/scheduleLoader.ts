@@ -2,7 +2,7 @@
 
 import { DocumentRegistry } from '@/lib/docs/registry';
 import { restoreDocuments } from '@/lib/docs/caseDocsClient';
-import { parseXer } from '@/lib/mapping/xerParser';
+import { parseXerBytes } from '@/lib/mapping/xerParser';
 import type { ScheduleModel } from '@/lib/mapping/types';
 
 /**
@@ -43,8 +43,8 @@ export async function loadCaseSchedules(caseId: string): Promise<ScheduleLoadRes
     const bytes = reg.bytesOf(d.id);
     if (!bytes) { problems.push({ fileName: d.name, reason: rs.needReconnect.find((n) => n.id === d.id)?.reason ?? 'The file contents are not available. Reconnect this file on the Documents screen.' }); continue; }
     try {
-      const model = parseXer(new TextDecoder('utf-8').decode(bytes), d.name);
-      if (model.activityCount === 0) { problems.push({ fileName: d.name, reason: model.warnings?.[0] ?? 'No activities were found in the file.' }); continue; }
+      const model = parseXerBytes(bytes, d.name);
+      if (model.activityCount === 0 || model.integrityProblems?.length) { problems.push({ fileName: d.name, reason: model.warnings?.[0] ?? 'No activities were found in the file.' }); continue; }
       schedules.push({ docId: d.id, fileName: d.name, sha256: d.sha256, subrole: d.subrole ?? '', model });
     } catch (e) {
       problems.push({ fileName: d.name, reason: `The programme could not be parsed: ${e instanceof Error ? e.message : 'unknown error'}` });

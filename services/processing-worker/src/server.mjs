@@ -10,7 +10,7 @@
 import http from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { JobManager } from './jobs.mjs';
-import { extractByName, sniff, LIMITS } from './extract.mjs';
+import { extractByName, sniff, LIMITS, ocrLanguageOptions, scanRasterizerReady } from './extract.mjs';
 import { convertDwg, probeDwg } from './dwg.mjs';
 import { startRunner, runnerState } from './runner.mjs';
 import { storeConfig } from './store.mjs';
@@ -68,13 +68,13 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://x');
     if (req.method === 'GET' && url.pathname === '/health') {
       const dwg = await probeDwg();
-      let pdf = false, docx = false, canvas = false, ocr = false;
+      let pdf = false, docx = false, ocr = false;
       try { await import('pdfjs-dist/legacy/build/pdf.mjs'); pdf = true; } catch {}
       try { await import('mammoth'); docx = true; } catch {}
-      try { const c = await import('@napi-rs/canvas'); canvas = typeof c.createCanvas === 'function'; } catch {}
-      try { await import('tesseract.js'); ocr = true; } catch {}
+      const rasterizer = await scanRasterizerReady();
+      try { ocrLanguageOptions(); await import('tesseract.js'); ocr = true; } catch {}
       const sc = storeConfig();
-      return json(res, 200, { status: 'ok', service: 'pvr-processing-worker', authConfigured: !!TOKEN, limits: LIMITS, running: manager.running, queued: manager.queue.length, durable: { configured: sc.ok, missing: sc.missing, runnerStarted: runnerState.started, workerId: runnerState.workerId, tasksRunning: runnerState.running, tasksProcessed: runnerState.processed, lastClaimAt: runnerState.lastClaimAt, lastError: runnerState.lastError }, dependencies: { pdfText: pdf, docx, rasteriser: canvas, ocrEngine: ocr, dwg: dwg.ok ? { ok: true, converter: dwg.converter, version: dwg.version } : { ok: false, reason: dwg.error } } });
+      return json(res, 200, { status: 'ok', service: 'pvr-processing-worker', authConfigured: !!TOKEN, limits: LIMITS, running: manager.running, queued: manager.queue.length, durable: { configured: sc.ok, missing: sc.missing, runnerStarted: runnerState.started, workerId: runnerState.workerId, tasksRunning: runnerState.running, tasksProcessed: runnerState.processed, lastClaimAt: runnerState.lastClaimAt, lastError: runnerState.lastError }, dependencies: { pdfText: pdf, docx, rasteriser: rasterizer, ocrEngine: ocr, dwg: dwg.ok ? { ok: true, converter: dwg.converter, version: dwg.version } : { ok: false, reason: dwg.error } } });
     }
     if (!authed(req)) return json(res, TOKEN ? 401 : 503, { error: TOKEN ? 'Unauthorised.' : 'WORKER_API_TOKEN is not configured on the worker.' });
 

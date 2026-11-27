@@ -1,57 +1,58 @@
 /**
  * Server-side document text extraction. Runs in Node (route handlers / tests), never in the browser.
  *  - PDF: text layer per page via pdfjs-dist. Pages with no text layer are flagged as scanned and OCR'd when a
- *         rasteriser is available (@napi-rs/canvas), otherwise reported explicitly as not read.
+ *         rasteriser is available (pdftoppm/Poppler), otherwise reported explicitly as not read.
  *  - DOCX: raw text via mammoth. Sections are paragraph groups, NOT physical pages.
- *  - Images: OCR via tesseract.js (eng traineddata is fetched once from OCR_LANG_PATH or the tesseract.js CDN;
- *            only the language model is downloaded, never project documents).
+ *  - Images: OCR via tesseract.js (uses the bundled English language model or an explicitly configured source).
  * Every result keeps page numbers, and every limit (page cap, size cap) is reported, never silently applied.
  * `coverage` states exactly how many units were read, OCR'd, skipped or failed.
  */
+import { execFile } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { promisify } from 'node:util';
+import { existsSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import type { ExtractedDocument } from './types';
 
 export const MAX_PDF_PAGES = 400;
 export const MAX_OCR_PAGES = 25;
 export const MAX_BYTES = 40 * 1024 * 1024;
+const MAX_OCR_PIXELS = 6_000_000;
 const MIN_TEXT_CHARS_PER_PAGE = 25;
+export function ocrLanguageOptions(env = process.env) {
+  const langPath = env.OCR_LANG_PATH?.trim() || resolve(process.cwd());
+  const remote = /^https?:\/\//i.test(langPath);
+  const raw = !remote && existsSync(join(langPath, 'eng.traineddata'));
+  if (!remote && !raw && !existsSync(join(langPath, 'eng.traineddata.gz'))) {
+    throw new Error('English OCR data were not packaged. Set OCR_LANG_PATH to a directory with eng.traineddata or eng.traineddata.gz.');
+  }
+  return { langPath, gzip: !raw, cacheMethod: 'none' as const };
+}
+
 
 const extOf = (n: string) => (n.match(/\.([a-z0-9]+)$/i) ?? [])[1]?.toLowerCase() ?? '';
 export const IMAGE_EXT = ['png', 'jpg', 'jpeg', 'tif', 'tiff', 'bmp', 'webp'];
 
 type OnPage = (info: { page: number; total: number; chars: number; method: string }) => void;
 
-type CanvasMod = { createCanvas: (w: number, h: number) => { getContext: (t: string) => unknown; toBuffer: (m: string) => Buffer; width: number; height: number }; Path2D: unknown; DOMMatrix: unknown; ImageData: unknown };
-let canvasMod: CanvasMod | null | undefined;
-
-/**
- * pdfjs-dist 5.x must draw with the same canvas implementation that supplies Path2D/DOMMatrix. Without these globals and
- * a canvasFactory, render() throws "not a valid enum value of type CanvasFillRule" (observed with @napi-rs/canvas 1.1.0),
- * which made OCR of scanned PDFs fail.
- */
-async function loadCanvas(): Promise<CanvasMod | null> {
-  if (canvasMod !== undefined) return canvasMod;
-  try {
-    const nc = (await import('@napi-rs/canvas')) as unknown as CanvasMod;
-    const g = globalThis as unknown as Record<string, unknown>;
-    g.Path2D ??= nc.Path2D; g.DOMMatrix ??= nc.DOMMatrix; g.ImageData ??= nc.ImageData;
-    canvasMod = nc;
-  } catch { canvasMod = null; }
-  return canvasMod;
+const run = promisify(execFile);
+const poppler = (env = process.env) => env.PDF_RASTERIZER_PATH?.trim() || 'pdftoppm';
+export async function scanRasterizerReady() {
+  try { await run(poppler(), ['-v'], { timeout: 3_000, maxBuffer: 32_000 }); return true; } catch { return false; }
 }
-
-type CC = { canvas: { width: number; height: number; getContext: (t: string) => unknown; toBuffer: (m: string) => Buffer } | null; context: unknown };
-function canvasFactory(nc: CanvasMod) {
-  return {
-    create(w: number, h: number): CC { const canvas = nc.createCanvas(w, h); return { canvas, context: canvas.getContext('2d') }; },
-    reset(cc: CC, w: number, h: number) { if (cc.canvas) { cc.canvas.width = w; cc.canvas.height = h; } },
-    destroy(cc: CC) { cc.canvas = null; cc.context = null; },
-  };
+async function rasterise(file: string, page: number): Promise<Uint8Array> {
+  // Isolate native rendering in a subprocess. A malformed PDF or an unavailable renderer must not crash the app.
+  const { stdout } = await run(poppler(), ['-f',String(page),'-l',String(page),'-r','144',
+    '-scale-to',String(Math.floor(Math.sqrt(MAX_OCR_PIXELS))),'-png','-singlefile',file],
+    {encoding:'buffer',timeout:15_000,maxBuffer:15*1024*1024,windowsHide:true});
+  if (stdout.subarray(1,4).toString() !== 'PNG') throw new Error('PDF rendering produced no PNG.');
+  return stdout;
 }
 
 async function ocrBuffers(images: Uint8Array[], startPage: number[], onPage?: OnPage): Promise<{ page: number; text: string; confidence: number }[]> {
   const { createWorker } = await import('tesseract.js');
-  const langPath = process.env.OCR_LANG_PATH;
-  const worker = await createWorker('eng', 1, langPath ? { langPath } : {});
+  const worker = await createWorker('eng', 1, ocrLanguageOptions());
   try {
     const out: { page: number; text: string; confidence: number }[] = [];
     for (let i = 0; i < images.length; i += 1) {
@@ -65,28 +66,13 @@ async function ocrBuffers(images: Uint8Array[], startPage: number[], onPage?: On
   }
 }
 
-type PdfPage = { getViewport: (o: { scale: number }) => { width: number; height: number }; render: (o: unknown) => { promise: Promise<void> } };
-async function rasterise(page: PdfPage): Promise<{ bytes: Uint8Array | null; error?: string }> {
-  const nc = await loadCanvas();
-  if (!nc) return { bytes: null, error: 'the "@napi-rs/canvas" rasteriser is not available in this runtime' };
-  try {
-    const vp = page.getViewport({ scale: 2 });
-    const { canvas, context } = canvasFactory(nc).create(Math.ceil(vp.width), Math.ceil(vp.height));
-    const g = context as { fillStyle: string; fillRect: (x: number, y: number, w: number, h: number) => void };
-    g.fillStyle = '#fff'; g.fillRect(0, 0, canvas!.width, canvas!.height);
-    await page.render({ canvasContext: context, viewport: vp, canvas }).promise;
-    return { bytes: new Uint8Array(canvas!.toBuffer('image/png')) };
-  } catch (e) { return { bytes: null, error: `page rendering failed: ${e instanceof Error ? e.message : 'unknown error'}` }; }
-}
-
 export async function extractPdf(name: string, bytes: Uint8Array, onPage?: OnPage): Promise<ExtractedDocument> {
   const base: ExtractedDocument = { name, method: 'pdf-text', pages: [], truncated: false, limitation: '' };
   if (bytes.byteLength > MAX_BYTES) return { ...base, limitation: `The PDF is ${(bytes.byteLength / 1048576).toFixed(1)} MB, above the ${MAX_BYTES / 1048576} MB limit. Split the document or upload the relevant pages.` };
   let pdfjs: typeof import('pdfjs-dist/legacy/build/pdf.mjs');
   try { pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs'); } catch (e) { return { ...base, limitation: `The PDF reader could not be loaded: ${e instanceof Error ? e.message : 'unknown error'}` }; }
-  const nc = await loadCanvas();
   let doc;
-  try { doc = await pdfjs.getDocument({ data: new Uint8Array(bytes), useSystemFonts: false, isEvalSupported: false, verbosity: 0, ...(nc ? { canvasFactory: canvasFactory(nc) } : {}) } as never).promise; }
+  try { doc = await pdfjs.getDocument({ data: new Uint8Array(bytes), useSystemFonts: false, isEvalSupported: false, verbosity: 0 } as never).promise; }
   catch (e) { return { ...base, limitation: `The PDF could not be opened: ${e instanceof Error ? e.message : 'unknown error'}${/password/i.test(String(e)) ? ' (it is password protected)' : ''}.` }; }
   const total = doc.numPages;
   const limit = Math.min(total, MAX_PDF_PAGES);
@@ -99,7 +85,14 @@ export async function extractPdf(name: string, bytes: Uint8Array, onPage?: OnPag
       const tc = await page.getTextContent();
       const text = tc.items.map((it) => ('str' in it ? it.str + ('hasEOL' in it && it.hasEOL ? '\n' : ' ') : '')).join('').replace(/[ \t]+/g, ' ').trim();
       pages.push({ page: p, text });
-      if (text.length < MIN_TEXT_CHARS_PER_PAGE) scanned.push(p);
+      // A small native caption/watermark can coexist with a raster-only drawing.
+      let rasterBody = false;
+      if (text.length >= MIN_TEXT_CHARS_PER_PAGE && text.length < 120) {
+        const ops = await page.getOperatorList().catch(() => null);
+        if (ops) rasterBody = ops.fnArray.some((op, i) =>
+          op === pdfjs.OPS.paintImageXObject && Number(ops.argsArray[i]?.[1]) >= 512 && Number(ops.argsArray[i]?.[2]) >= 384);
+      }
+      if (text.length < MIN_TEXT_CHARS_PER_PAGE || rasterBody) scanned.push(p);
       onPage?.({ page: p, total: limit, chars: text.length, method: 'pdf-text' });
     } catch { pages.push({ page: p, text: '' }); failedPages.push(p); }
   }
@@ -111,31 +104,48 @@ export async function extractPdf(name: string, bytes: Uint8Array, onPage?: OnPag
     const ocrPages = scanned.slice(0, MAX_OCR_PAGES);
     const images: Uint8Array[] = [];
     const nums: number[] = [];
-    let renderError = '';
-    for (let p of ocrPages) {
-      const r = await rasterise((await doc.getPage(p)) as unknown as PdfPage);
-      if (!r.bytes) { renderError = r.error ?? 'unknown rendering error'; break; }
-      images.push(r.bytes); nums.push(p);
-    }
+    const renderFailures: string[] = [];
+    let folder: string | undefined;
+    try {
+      folder = await mkdtemp(join(tmpdir(),'pvr-pdf-'));
+      const file = join(folder,'input.pdf');
+      await writeFile(file, bytes, {mode:0o600});
+      for (const p of ocrPages) {
+        try { images.push(await rasterise(file,p)); nums.push(p); }
+        catch (e) {
+          renderFailures.push(`${p} (${e instanceof Error && 'code' in e && e.code==='ENOENT' ? 'Poppler is not installed; use the configured processing worker for scan OCR' : 'the rasterizer failed or exceeded its limits'})`);
+          if (e instanceof Error && 'code' in e && e.code==='ENOENT') break;
+        }
+      }
+    } catch (e) { renderFailures.push(e instanceof Error ? e.message : 'Unable to stage PDF for rendering.'); }
+    finally { if (folder) await rm(folder, {recursive:true,force:true}); }
+    if (renderFailures.length) limitation += `OCR render failed page(s): ${renderFailures.slice(0, 6).join('; ')}. `;
     if (images.length === 0) {
-      limitation += `${scanned.length} page(s) have no text layer (scanned) and were NOT read because OCR could not run (${renderError}): pages ${scanned.slice(0, 20).join(', ')}${scanned.length > 20 ? '…' : ''}. `;
+      limitation += `${scanned.length} page(s) need OCR and were NOT fully read because no page could be rendered: pages ${scanned.slice(0, 20).join(', ')}${scanned.length > 20 ? '…' : ''}. `;
     } else {
       try {
         const ocr = await ocrBuffers(images, nums, onPage);
         const stillEmpty: number[] = [];
-        for (const o of ocr) { let i = pages.findIndex((x) => x.page === o.page); if (i >= 0) pages[i] = { page: o.page, text: o.text.trim(), confidence: o.confidence }; if (!o.text.trim()) stillEmpty.push(o.page); }
+        for (const o of ocr) { let i = pages.findIndex((x) => x.page === o.page); if (i >= 0 && o.text.trim()) {
+          const native = pages[i].text;
+          const extracted = o.text.trim();
+          const normalize = (s: string) => s.toLowerCase().replace(/\s+/g,' ').trim();
+          pages[i] = { page: o.page, text: native && !normalize(extracted).includes(normalize(native)) ? native+'\n'+extracted : extracted, confidence: o.confidence };
+        } if (!o.text.trim()) stillEmpty.push(o.page); }
         method = 'ocr';
-        const notReached = scanned.length - images.length;
-        if (notReached > 0) limitation += `${notReached} further scanned page(s) were NOT OCR'd (${scanned.length > ocrPages.length ? `limit ${MAX_OCR_PAGES} pages per document` : renderError}). `;
+        const notReached = scanned.length - ocrPages.length;
+        if (notReached > 0) limitation += `${notReached} further scanned page(s) were NOT OCR'd (limit ${MAX_OCR_PAGES} pages per document). `;
+        const low = ocr.filter(o => o.text.trim() && o.confidence < 70).map(o => o.page);
+        if (low.length) limitation += `Low-confidence OCR needs manual verification on page(s): ${low.slice(0,20).join(', ')}. `;
         if (stillEmpty.length) limitation += `OCR recognised no text on page(s) ${stillEmpty.slice(0, 20).join(', ')}. `;
         limitation += `OCR was used for ${ocr.length} scanned page(s); OCR text can contain errors and is not used for geometric measurement. `;
       } catch (e) {
-        limitation += `OCR failed for ${images.length} scanned page(s): ${e instanceof Error ? e.message : 'unknown error'}. If the server cannot download the OCR language model, set OCR_LANG_PATH to a location that hosts eng.traineddata. `;
+        limitation += `OCR failed for ${images.length} scanned page(s): ${e instanceof Error ? e.message : 'unknown error'}. Check the packaged English language model or OCR_LANG_PATH configuration. `;
       }
     }
   }
   await doc.destroy();
-  return { ...base, method, pages, truncated: total > limit, limitation: limitation.trim() };
+  return { ...base, method, pages, truncated: total > limit || failedPages.length>0 || scanned.some(p => pages[p-1]?.confidence === undefined), limitation: limitation.trim() };
 }
 
 export async function extractDocx(name: string, bytes: Uint8Array): Promise<ExtractedDocument> {
@@ -165,7 +175,7 @@ export async function extractImage(name: string, bytes: Uint8Array, onPage?: OnP
     const t = r[0].text.trim();
     return { ...base, pages: [{ page: 1, text: t, confidence: r[0].confidence }], limitation: `${t ? '' : 'OCR recognised no text. '}OCR text can contain errors. It is not used for geometric measurement: a scanned drawing needs a scale and alignment before anything is measured.`.trim() };
   } catch (e) {
-    return { ...base, limitation: `OCR failed: ${e instanceof Error ? e.message : 'unknown error'}. If the server cannot download the OCR language model, set OCR_LANG_PATH to a location that hosts eng.traineddata.` };
+    return { ...base, limitation: `OCR failed: ${e instanceof Error ? e.message : 'unknown error'}. Check the packaged English language model or OCR_LANG_PATH configuration.` };
   }
 }
 

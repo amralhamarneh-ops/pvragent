@@ -10,24 +10,29 @@ import { newId, selectedImportOf } from '@/lib/boq/store';
 import { remapTarget, staleness, toSavedCalculation, type SavedCalculation } from '@/lib/boq/revisions';
 import type { BoqItemRecord, CalcResult, ChangeDirection } from '@/lib/boq/types';
 import type { BasisKind, DerivationInput } from '@/lib/boq/units';
+import SavedDrawingReplay from '@/app/case-workspace/components/SavedDrawingReplay';
 import AgentBoqReview from '@/app/case-workspace/components/AgentBoqReview';
 import { importSignatureOf, readEvidenceFile, runAgent, outcomeOf, type AgentEvent, type AgentRun } from '@/lib/boq/agentClient';
 import { EMPTY_ANSWERS, type UserAnswers } from '@/lib/boq/matchEngine';
 import type { EvidenceDoc } from '@/lib/boq/scope';
 import { handoffAsEvidence, loadHandoff, normaliseHandoff, type ChangeHandoff } from '@/lib/drawings/handoff';
-import { loadEvidence, saveEvidence } from '@/lib/docs/caseDocsClient';
+import { loadDrawingManifest, loadEvidence, saveEvidence } from '@/lib/docs/caseDocsClient';
 import { buildBoqModel, EMPTY_INCLUSION, parseInclusion, type BoqInclusionState } from '@/lib/boq/documents';
 import { overlappingItems } from '@/lib/boq/coverage';
+import { makeMatchSnapshot, MATCH_SNAPSHOT_KEY, readMatchSnapshot, type MatchSnapshot } from '@/lib/boq/matchSnapshot';
 import { writeRunRecord } from '@/lib/boq/runRecord';
 import { resumableDrafts } from '@/lib/docs/scopedDraft';
-import { D } from '@/lib/assessment/decimal';
 import { EMPTY_STATE, DEFAULT_SCENARIO, EMPTY_DECISIONS, describeChange, readDecisions, readResolutionState, reconcileDecisions, staleEffects, writeDecisions, writeResolutionState, type DecisionStore, type LineResolution, type ResolutionState } from '@/lib/boq/resolutions';
+import FinalPvrForm from '@/app/case-workspace/components/FinalPvrForm';
+import type { FormLine, ProgrammeWhatIf } from '@/lib/pvr/finalForm';
+import { matchesCurrentDrawings } from '@/lib/boq/drawingQuantities';
 import ActivityMappingPanel, { type ScheduleExclusion } from '@/app/case-workspace/components/ActivityMappingPanel';
 import NewItemEntry from '@/app/case-workspace/components/NewItemEntry';
 import { ExcludeModal, ManualRateModal } from '@/app/case-workspace/components/LineResolutionControls';
 import { buildBoqSet } from '@/lib/boq/matchEngine';
 import { readItems, writeItems, prefillFromComponent, type AssessmentItem, type ItemDraft } from '@/lib/boq/newItem';
 import { loadCaseSchedules, type ScheduleLoadResult } from '@/lib/mapping/scheduleLoader';
+import RealProgrammePanel, { referenceOnlyProgramme } from '@/app/case-workspace/components/RealProgrammePanel';
 import { buildSharedLines, buildSharedLinesDetailed } from '@/lib/mapping/sharedLines';
 import type { MappingChoices } from '@/lib/mapping/realActivityMapping';
 import ValuationPanel from '@/app/case-workspace/components/ValuationPanel';
@@ -66,10 +71,14 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
   const [agentRunning, setAgentRunning] = useState(false);
   const [agentEvents, setAgentEvents] = useState<AgentEvent[]>([]);
   const [agentError, setAgentError] = useState('');
+  const [savedMatches, setSavedMatches] = useState<{ caseId: string; snapshot: MatchSnapshot; drawingsCurrent: boolean; persisted: boolean } | null>(null);
+  const [matchSaveNote, setMatchSaveNote] = useState('');
   const [rawAnswers, setAnswers] = useState<UserAnswers>(EMPTY_ANSWERS);
   const [assessmentConfirmed, setAssessmentConfirmed] = useState(false);
+  const [programmeWhatIf, setProgrammeWhatIf] = useState<ProgrammeWhatIf | null>(null);
   const [showManual, setShowManual] = useState(false);
   const [handoff, setHandoff] = useState<ChangeHandoff | null>(null);
+  const [verifiedReplay, setVerifiedReplay] = useState<{ caseId: string; handoff: ChangeHandoff } | null>(null);
   const [resState, setResState] = useState<ResolutionState>(EMPTY_STATE);
   const [partialAccepted, setPartialAccepted] = useState(false);
   /** Which BOQ documents are excluded and which revision is selected per document (persisted with the case evidence). */
@@ -82,6 +91,7 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
   const [schedLoading, setSchedLoading] = useState(false);
   const [schedIdx, setSchedIdx] = useState(0);
   const [mapChoices, setMapChoices] = useState<MappingChoices>({});
+  const [mappingProgrammeHash, setMappingProgrammeHash] = useState('');
   const [schedExcl, setSchedExcl] = useState<Record<string, ScheduleExclusion>>({});
   const [decisions, setDecisions] = useState<DecisionStore>(EMPTY_DECISIONS);
   const [invalidatedCount, setInvalidatedCount] = useState(0);
@@ -108,17 +118,17 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
     setDecisions(readDecisions(caseId));
     try {
       const raw = window.localStorage.getItem(MAP_KEY);
-      const p = raw ? (JSON.parse(raw) as { choices?: MappingChoices; excl?: Record<string, ScheduleExclusion>; partial?: boolean }) : {};
-      setMapChoices(p.choices ?? {}); setSchedExcl(p.excl ?? {}); setPartialAccepted(!!p.partial);
-    } catch { setMapChoices({}); setSchedExcl({}); }
+      const p = raw ? (JSON.parse(raw) as { choices?: MappingChoices; excl?: Record<string, ScheduleExclusion>; partial?: boolean; programmeHash?: string }) : {};
+      setMappingProgrammeHash(p.programmeHash ?? ''); setMapChoices(p.choices ?? {}); setSchedExcl(p.excl ?? {}); setPartialAccepted(!!p.partial);
+    } catch { setMappingProgrammeHash(''); setMapChoices({}); setSchedExcl({}); }
     setHydrated(true);
   }, [caseId, MAP_KEY]);
 
   // Persist mapping decisions (by stable line id) so a reload restores them.
   useEffect(() => {
     if (!hydrated) return;
-    try { window.localStorage.setItem(MAP_KEY, JSON.stringify({ choices: mapChoices, excl: schedExcl, partial: partialAccepted })); } catch { /* reported when a decision is made */ }
-  }, [hydrated, MAP_KEY, mapChoices, schedExcl, partialAccepted]);
+    try { window.localStorage.setItem(MAP_KEY, JSON.stringify({ choices: mapChoices, excl: schedExcl, partial: partialAccepted, programmeHash: mappingProgrammeHash })); } catch { /* reported when a decision is made */ }
+  }, [hydrated, MAP_KEY, mapChoices, schedExcl, partialAccepted, mappingProgrammeHash]);
 
   // `answers` is assembled further down, once the active BOQ set and the current run are known: persisted decisions are
   // keyed by stable line id and are re-attached to whichever component ids the current run produced.
@@ -155,8 +165,15 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
       const ev = await loadEvidence(caseId);
       if (cancelled) return;
       setInclusion(parseInclusion(ev.evidence?.answers));
+      const snapshot = readMatchSnapshot(ev.evidence?.answers?.[MATCH_SNAPSHOT_KEY]);
       const fromServer = ev.evidence?.handoff ? normaliseHandoff(ev.evidence.handoff) : null;
       const h = fromServer ?? loadHandoff(caseId);
+      if (snapshot || h?.drawingReplay) {
+        const current = await loadDrawingManifest(caseId);
+        if (cancelled) return;
+        if (snapshot) setSavedMatches({ caseId, snapshot, drawingsCurrent: matchesCurrentDrawings(snapshot.drawings, current), persisted: ev.persisted });
+        if (h?.drawingReplay && matchesCurrentDrawings(h.documents, current)) setVerifiedReplay({caseId, handoff:h});
+      }
       const original = ev.evidence?.narrative ?? h?.originalNarrative ?? '';
       if (original.trim()) setNarrative((cur) => (cur.trim() ? cur : original));
       if (!h) return;
@@ -236,7 +253,9 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
   }, [rawAnswers, resState.resolutions, reconciled.active, lineToComponent]);
 
   const currentOutcome = useMemo(() => (agentRun ? outcomeOf(agentRun, answers) : null), [agentRun, answers]);
-  const sharedDetailed = useMemo(() => buildSharedLinesDetailed(agentRun?.scope ?? null, currentOutcome, items2, loaded?.case?.currency ?? 'AED'), [agentRun, currentOutcome, items2, loaded]);
+  // Free-entry items are kept as notes for review, not priced in the drawing-based PVR.
+  const reviewItems = useMemo(() => items2.map(i => ({...i,quantity:null,rate:null})), [items2]);
+  const sharedDetailed = useMemo(() => buildSharedLinesDetailed(agentRun?.scope ?? null, currentOutcome, reviewItems, loaded?.case?.currency ?? 'AED'), [agentRun, currentOutcome, reviewItems, loaded]);
   const sharedLines = sharedDetailed.lines;
   const lineById = useMemo(() => new Map(sharedLines.map((l) => [l.lineId, l])), [sharedLines]);
   const boqSet = useMemo(() => (activeSet.length ? buildBoqSet(activeSet) : null), [activeSet]);
@@ -315,11 +334,26 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
     void loadCaseSchedules(caseId).then((r) => { if (!cancelled) { setSchedLoad(r); setSchedIdx(0); setSchedLoading(false); } }).catch(() => { if (!cancelled) setSchedLoading(false); });
     return () => { cancelled = true; };
   }, [caseId, mapRetry]);
-  const activeSchedule = schedLoad?.schedules[schedIdx] ?? null;
+  const inputSchedules = useMemo(() => schedLoad?.schedules.filter(s => !referenceOnlyProgramme(s)) ?? [], [schedLoad]);
+  const referenceSchedules = useMemo(() => schedLoad?.schedules.filter(referenceOnlyProgramme) ?? [], [schedLoad]);
+  const activeSchedule = inputSchedules[schedIdx] ?? null;
+  const confirmedProgrammeTasks = useMemo(() => mappingProgrammeHash === activeSchedule?.sha256
+    ? sharedLines.filter(l => l.work.executes && !schedExcl[l.lineId] && !mapChoices[l.lineId]?.state).flatMap(l => mapChoices[l.lineId]?.activityTaskIds ?? []) : [],
+    [mappingProgrammeHash,activeSchedule,sharedLines,schedExcl,mapChoices]);
 
   // A changed programme invalidates choices that pointed at its activities.
   useEffect(() => {
     if (!hydrated || !schedLoad || !activeSchedule) return;
+    if (mappingProgrammeHash !== activeSchedule.sha256) {
+      setMapChoices(cur => Object.fromEntries(Object.entries(cur).flatMap(([key,value]) => {
+        if (!value.activityTaskIds?.length) return [[key,value]];
+        const {activityTaskIds: _ids, shares: _shares, ...rest} = value;
+        return Object.keys(rest).length ? [[key,rest]] : [];
+      })));
+      setMappingProgrammeHash(activeSchedule.sha256);
+      setAssessmentConfirmed(false);
+      return;
+    }
     const known = new Set(activeSchedule.model.activities.map((a) => a.taskId ?? a.id));
     setMapChoices((cur) => {
       let changed = false; const next: MappingChoices = {};
@@ -329,7 +363,7 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
       }
       return changed ? next : cur;
     });
-  }, [hydrated, schedLoad, activeSchedule]);
+  }, [hydrated, schedLoad, activeSchedule, mappingProgrammeHash]);
 
   /** Resolve a line (by stable id) through the same resolution model for both the cost review and the activity panel. */
   const resolveLine = useCallback((lineId: string, next: LineResolution | undefined) => {
@@ -374,10 +408,13 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
   const analyse = async () => {
     setAgentRunning(true);
     setAgentError('');
+    setMatchSaveNote('');
     setAgentEvents([]);
     setAssessmentConfirmed(false);
     try {
-      const run = await runAgent({ imports: activeSet, narrative, evidence, onEvent: (e) => setAgentEvents((l) => [...l, e]) });
+      const activeDrawingDocuments = await loadDrawingManifest(caseId);
+      const run = await runAgent({ imports: activeSet, narrative, evidence, drawingQuantityHandoff: handoff, activeDrawingDocuments, onEvent: (e) => setAgentEvents((l) => [...l, e]) });
+      setProgrammeWhatIf(null);
       setAgentRun(run);
       writeRunRecord(caseId, {
         runAt: new Date().toISOString(),
@@ -387,6 +424,13 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
         evidenceUnread: Object.fromEntries(evidence.filter((e) => !e.extracted).map((e) => [e.name, e.note || 'Its content was not extracted.'])),
       });
       setAnswers(EMPTY_ANSWERS);
+      const snapshot = makeMatchSnapshot(outcomeOf(run, EMPTY_ANSWERS), run.importSignature, activeDrawingDocuments, new Date().toISOString());
+      const serialized = JSON.stringify(snapshot);
+      if (snapshot.rows.length && readMatchSnapshot(serialized)) {
+        const save = await saveEvidence(caseId, { matchSnapshot: serialized });
+        if (save.saved) setSavedMatches({ caseId, snapshot, drawingsCurrent: !!handoff && matchesCurrentDrawings(handoff.documents, activeDrawingDocuments), persisted: save.persisted });
+        setMatchSaveNote(save.saved ? (save.persisted ? 'BOQ match preview saved to this case.' : 'BOQ match preview saved in this tab only.') : `BOQ match preview was not saved: ${save.error}`);
+      } else setMatchSaveNote(snapshot.rows.length ? 'The BOQ match preview could not be verified for saving.' : 'This run found no primary BOQ matches with verified drawing quantities to save. An earlier saved preview, if any, is unchanged.');
       // The first completed analysis fixes the baseline the decisions are made against. Later changes mark results stale.
       setSavedFingerprint((cur) => cur ?? makeFingerprint({ boqSignature: activeSignature, scopeKeys: run.scope.components.map((c) => `${c.name}|${c.action}|${c.location}|${c.quantity?.value ?? ''}${c.quantity?.unit ?? ''}`).concat(handoff ? [`handoff:${handoff.analysisVersion ?? ''}:${(handoff.records ?? []).map((r) => `${r.id}:${r.netQty}`).join(',')}`] : []), mapping: mapChoices, documents: evidence.map((e) => `${e.name}:${e.text.length}`).concat([`narrative:${narrative.length}`]) }));
     } catch (e) {
@@ -396,38 +440,21 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
     }
   };
 
+  const drawingsAreCurrent = async () => !!handoff && matchesCurrentDrawings(handoff.documents, await loadDrawingManifest(caseId));
   const confirmAssessment = async () => {
     if (!agentRun || !selectedImport || !loaded?.case) return;
+    if (agentStale || !(await drawingsAreCurrent())) {
+      setAssessmentConfirmed(false);
+      toast.error('The BOQ or drawing revisions changed or cannot be verified. Rerun the current drawing-based assessment.');
+      return;
+    }
     const outcome = outcomeOf(agentRun, answers);
     const heldIds = new Set(sharedLines.filter((s) => s.heldForOverlap).map((s) => s.componentId));
-    const lines = outcome.lines.filter((l) => l.valued && !l.excluded && !l.deferred && !heldIds.has(l.componentId) && (l.manual || (l.calc && l.calc.ok)));
-    // Priced assessment items (quantity and rate both given) are part of the cost. Unpriced ones stay unpriced, never zero.
-    const pricedItems = items2.filter((it) => it.quantity !== null && it.rate !== null && !answers.resolutions?.[it.linkedScope || it.id] && !decisions.decisions[`new|${it.id}`]);
-    if (lines.length === 0 && pricedItems.length === 0) { toast.error('There are no priced lines to confirm.'); return; }
+    const lines = outcome.lines.filter((l) => l.quantityOrigin === 'Measured from geometry' && l.valued && !l.excluded && !l.deferred && !heldIds.has(l.componentId) && (l.manual || (l.calc && l.calc.ok)));
+    if (lines.length === 0) { toast.error('There are no priced drawing-based lines to confirm.'); return; }
     setSavingCalc(true);
     let saved = 0; let failed = '';
     let list = calcs;
-    for (const it of pricedItems) {
-      const owner = selectedImport;
-      const qty = it.quantity as string; const rate = it.rate as string;
-      const mul = D(qty).mul(D(rate));
-      const signed = it.changeType === 'omission' ? mul.neg().toString() : mul.toString();
-      let record: SavedCalculation = {
-        id: newId('calc'), caseId: loaded.case.id, createdAt: new Date().toISOString(),
-        description: `${it.description} · Assessment item · Proposed${it.supportingReference ? ` (${it.supportingReference})` : ''}`,
-        direction: it.changeType === 'omission' ? 'omission' : 'addition',
-        importId: owner.id, importRevision: owner.revision, importFileName: owner.source.fileName, importSha256: owner.source.sha256,
-        itemId: `new:${it.id}`, itemRef: 'NEW-ITEM', itemDescription: it.description, sheet: 'Assessment item', rowNumber: 0, rateCell: '',
-        rate, currency: it.currency, boqUnit: it.uom, quantity: qty, quantityUnit: it.uom, convertedQuantity: qty,
-        signedAmount: signed, formula: `${it.changeType === 'omission' ? '−' : '+'} ${qty} ${it.uom} × ${rate} ${it.currency}/${it.uom} = ${signed} ${it.currency}`,
-        conversion: { type: 'identity', originalQuantity: qty, originalUnit: it.uom, derivedQuantity: qty, derivedUnit: it.uom, derivation: 'Assessment item entered in its own unit', supportingInputs: [], basis: null },
-        reviewedAgainstImportId: null,
-      };
-      const out = await persistCalculation(record, list);
-      if (!out.saved) { failed = out.error; break; }
-      list = [...list, record]; saved += 1;
-    }
-    if (failed) { setSavingCalc(false); setCalcs(list); toast.error(`Confirmed ${saved} line(s). Stopped: ${failed}`); return; }
     for (const l of lines) {
       const owner = activeSet.find((i) => i.id === l.item.importId) ?? selectedImport;
       let record: SavedCalculation;
@@ -437,10 +464,10 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
         const q = m.quantityText.split(' ');
         record = {
           id: newId('calc'), caseId: loaded.case.id, createdAt: new Date().toISOString(),
-          description: `${l.componentName} · Manual rate · Proposed (${m.rate.reason}; entered by ${m.rate.enteredBy})`,
+          description: m.rate.processedPvr ? `${l.componentName} · Processed PVR · Pilot only (${m.rate.processedPvr.file}, page ${m.rate.processedPvr.page}, ${m.rate.processedPvr.row}; ${m.rate.reason}; entered by ${m.rate.enteredBy})` : `${l.componentName} · Manual rate · Proposed (${m.rate.reason}; entered by ${m.rate.enteredBy})`,
           direction: m.amountSigned.startsWith('-') ? 'omission' : 'addition',
           importId: owner.id, importRevision: owner.revision, importFileName: owner.source.fileName, importSha256: owner.source.sha256,
-          itemId: l.item.id, itemRef: 'MANUAL', itemDescription: l.componentName, sheet: 'Manual rate', rowNumber: 0, rateCell: '',
+          itemId: l.item.id, itemRef: m.rate.processedPvr ? 'PVR-PILOT' : 'MANUAL', itemDescription: l.componentName, sheet: m.rate.processedPvr ? 'Processed PVR pilot' : 'Manual rate', rowNumber: 0, rateCell: '',
           rate: m.rate.value, currency: m.rate.currency, boqUnit: m.rate.unit, quantity: q[0] ?? '', quantityUnit: q.slice(1).join(' '), convertedQuantity: q[0] ?? '',
           signedAmount: m.amountSigned, formula: m.formula,
           conversion: { type: 'identity', originalQuantity: q[0] ?? '', originalUnit: q.slice(1).join(' '), derivedQuantity: q[0] ?? '', derivedUnit: m.rate.unit, derivation: 'Manual rate in the quantity unit', supportingInputs: [], basis: null },
@@ -580,6 +607,36 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
   }
 
   const c = loaded.case;
+  const formLines: FormLine[] = sharedLines.flatMap(l => {
+    const t = totalsLines.find(row => row.lineId===l.lineId);
+    if (!t) return [];
+    const component=agentRun?.scope.components.find(c=>c.id===l.componentId);
+    const q=l.origin!=='new_item' && component?.quantity?.origin==='measured_from_geometry' ? component.quantity : null;
+    const price=currentOutcome?.lines.find(p=>p.componentId===l.componentId && p.role==='primary');
+    const calc=price?.calc?.ok ? price.calc : null;
+    const manual=price?.manual?.rate;
+    const fallback=!!manual?.processedPvr;
+    const sources=calc?.sources.map(s=>[s.file,[s.sheet,s.rateCell].filter(Boolean).join('!')].filter(Boolean).join(' · ')).join('; ');
+    const trusted=!!q && !!(calc||fallback);
+    return [{
+      ...t, disposition:t.disposition==='priced'&&!trusted?'unpriced':t.disposition,
+      signedAmount:trusted?t.signedAmount:null, description:l.name, quantity:q?.value??null, quantityUnit:q?.unit??l.work.unit,
+      drawingSource:q ? [q.source,q.quote].filter(Boolean).join(' · ') : '',
+      rate:fallback ? manual!.value : calc?.rate??null, rateUnit:fallback ? manual!.unit : calc?.boqUnit??'',
+      rateSource:fallback ? 'Processed PVR rate (BOQ unavailable): '+l.source : sources ? 'Contract BOQ: '+sources : 'No verified BOQ or cited fallback rate',
+      rateFallback:fallback,
+      mappedActivity:mappingProgrammeHash === activeSchedule?.sha256 && !mapChoices[l.lineId]?.state
+        ? (mapChoices[l.lineId]?.activityTaskIds??[]).map(id=>activeSchedule?.model.activities.find(a=>(a.taskId??a.id)===id)?.id).filter(Boolean).join(', ') : undefined,
+    } satisfies FormLine];
+  });
+  const whatIf=programmeWhatIf && activeSchedule?.fileName===programmeWhatIf.input ? programmeWhatIf : null;
+  const formReady=!!agentRun && assessmentConfirmed && !agentStale && !staleNow.length && !resState.costStale && !agentRunning;
+  const formBlockers=[
+    ...(!agentRun?['Run the drawing-based analysis.']:!formReady?['Review and confirm the current valuation before treating this as a final PVR.']:[]),
+    ...(formLines.some(l=>l.disposition==='unpriced'||l.disposition==='deferred'||l.disposition==='held_overlap')?['Some lines are unpriced, deferred, or held for review. The priced subtotal is not the full PVR value.']:[]),
+    'No verified full-scope programme result is available. What-if scenarios do not contribute to PVR time impact.',
+  ];
+
   const confirmed = imports.filter((i) => i.confirmedAt);
 
   return (
@@ -679,6 +736,27 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
             </section>
           ) : null}
 
+          {verifiedReplay?.caseId === caseId && handoff === verifiedReplay.handoff && handoff.drawingReplay ? (
+            <SavedDrawingReplay replay={handoff.drawingReplay} changes={handoff.changes} />
+          ) : handoff?.drawingReplay ? (
+            <p className="text-sm text-muted-foreground">Saved drawing replay is unavailable because the active drawings could not be verified.</p>
+          ) : null}
+          {savedMatches?.caseId === caseId && !agentRun ? (
+            <section aria-label="Saved BOQ match preview" className="rounded-lg border border-border bg-card p-4">
+              <h3 className="font-semibold">Saved BOQ match preview</h3>
+              <p className="text-sm text-muted-foreground">Run from {new Date(savedMatches.snapshot.runAt).toLocaleString()}. Review only; not a confirmed valuation.{!savedMatches.persisted ? ' Saved in this tab only.' : ''}</p>
+              {!savedMatches.drawingsCurrent || savedMatches.snapshot.importSignature !== activeSignature ? <p role="status" className="mt-2 text-sm text-warning">Historical result: the source BOQ or drawings have changed or could not be verified.</p> : null}
+              {savedMatches.snapshot.rows.length ? <ul className="mt-2 divide-y divide-border text-sm">
+                {savedMatches.snapshot.rows.map((row, i) => <li key={i} className="py-2">
+                  <p className="font-medium">{row.name} · {row.quantity} → {row.item} {row.description}</p>
+                  <p className="text-muted-foreground">{row.source} · {row.file}{row.note ? ` · ${row.note}` : ''}</p>
+                </li>)}
+              </ul> : <p className="mt-2 text-sm text-muted-foreground">No primary BOQ matches with drawing-measured quantities were saved from this run.</p>}
+              {savedMatches.snapshot.total > savedMatches.snapshot.rows.length ? <p className="text-sm text-muted-foreground">Showing {savedMatches.snapshot.rows.length} of {savedMatches.snapshot.total} saved-run lines.</p> : null}
+            </section>
+          ) : null}
+          {matchSaveNote ? <p role="status" className="text-sm text-muted-foreground">{matchSaveNote}</p> : null}
+
           <AgentBoqReview
             run={agentRun}
             running={agentRunning}
@@ -751,24 +829,24 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
                     </li>
                   ))}
                 </ul>
-              ) : <p className="mt-1 text-sm text-muted-foreground">Add an existing BOQ item or create a new assessment item for scope the BOQ does not cover. It stays in this case and never changes the source BOQ.</p>}
+              ) : <p className="mt-1 text-sm text-muted-foreground">Assessment items are notes until the scope has a verified drawing takeoff. They do not contribute manually entered quantities or prices to the PVR form.</p>}
             </section>
           ) : null}
 
+          {inputSchedules.length > 1 ? (
+                <div className="flex items-center gap-2 text-sm"><label htmlFor="sched-pick" className="text-muted-foreground">Programme in use</label>
+                  <select id="sched-pick" value={schedIdx} onChange={(e) => setSchedIdx(Number(e.target.value))} className="rounded-md border border-input bg-card px-2 py-1 text-foreground">{inputSchedules.map((s, i) => <option key={s.docId} value={i}>{s.fileName}{s.subrole ? ` (${s.subrole})` : ''}</option>)}</select></div>
+              ) : null}
+          {schedLoad && schedLoad.problems.length > 0 ? <ul role="status" className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-foreground">{schedLoad.problems.map((pr) => <li key={pr.fileName}><span className="font-medium">{pr.fileName}</span>: {pr.reason}</li>)}</ul> : null}
           {agentRun ? (
             <>
-              {schedLoad && schedLoad.schedules.length > 1 ? (
-                <div className="flex items-center gap-2 text-sm"><label htmlFor="sched-pick" className="text-muted-foreground">Programme in use</label>
-                  <select id="sched-pick" value={schedIdx} onChange={(e) => setSchedIdx(Number(e.target.value))} className="rounded-md border border-input bg-card px-2 py-1 text-foreground">{schedLoad.schedules.map((s, i) => <option key={s.docId} value={i}>{s.fileName}{s.subrole ? ` (${s.subrole})` : ''}</option>)}</select></div>
-              ) : null}
-              {schedLoad && schedLoad.problems.length > 0 ? <ul role="status" className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-foreground">{schedLoad.problems.map((pr) => <li key={pr.fileName}><span className="font-medium">{pr.fileName}</span>: {pr.reason}</li>)}</ul> : null}
               {schedLoading ? <div className="skeleton h-24 rounded-lg" role="status" aria-label="Reading programme" /> : (
                 <ActivityMappingPanel
                   model={activeSchedule?.model ?? null}
                   scheduleFileName={activeSchedule?.fileName ?? ''}
                   lines={sharedLines}
-                  choices={mapChoices}
-                  onChoices={(c) => { setMapChoices(c); setAssessmentConfirmed(false); }}
+                  choices={mappingProgrammeHash === activeSchedule?.sha256 ? mapChoices : {}}
+                  onChoices={(c) => { setMappingProgrammeHash(activeSchedule?.sha256 ?? ''); setMapChoices(c); setAssessmentConfirmed(false); }}
                   scheduleExclusions={schedExcl}
                   onScheduleExclusion={(id, ex) => {
                     setSchedExcl((cur) => { const n = { ...cur }; if (ex) n[id] = ex; else delete n[id]; return n; });
@@ -788,6 +866,10 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
             </>
           ) : null}
 
+          {activeSchedule ? <RealProgrammePanel key={activeSchedule.sha256} source={activeSchedule} references={referenceSchedules}
+            confirmedTaskIds={confirmedProgrammeTasks} onScenario={setProgrammeWhatIf} />
+            : referenceSchedules.length > 0 ? <p role="status">A processed programme is available. Upload the pre-impact XER separately to compare the two.</p> : null}
+          <FinalPvrForm key={caseId} caseId={caseId} title={c.title} lines={formLines} reportReady={formReady} whatIf={whatIf} blockers={formBlockers} verifyDrawingRevisions={drawingsAreCurrent} />
           {itemModal ? (
             <NewItemEntry key={itemModal.existing?.id ?? 'new'} open caseId={caseId} currency={loaded.case.currency || 'AED'} initial={itemModal.draft} existing={itemModal.existing} set={boqSet}
               scopeOptions={(agentRun?.scope.components ?? []).map((c) => ({ id: c.id, label: c.name }))} onClose={() => setItemModal(null)} onSaveItem={saveItem} onAddBoqItem={addBoqItemToScope} newId={() => newId('item')} />
@@ -796,15 +878,15 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
           {panelManual ? (() => {
             const l = lineById.get(panelManual);
             const comp = agentRun?.scope.components.find((c) => c.id === l?.componentId);
-            const q = l ? (answers.quantity[l.componentId] ?? comp?.quantity ?? (l.work.quantity ? { value: l.work.quantity, unit: l.work.unit } : null)) : null;
+            const q = l ? (comp?.quantity ?? null) : null;
             const existing = l ? answers.resolutions?.[l.componentId] : undefined;
-            return <ManualRateModal key={`pm-${panelManual}`} open line={l ? ({ componentName: l.name } as never) : null} currency={loaded.case.currency || 'AED'} quantity={q ? { value: q.value, unit: q.unit } : null} direction={l?.work.action === 'omit' ? 'omission' : 'addition'} existing={existing?.kind === 'manual_rate' ? existing.manual : undefined} onClose={() => setPanelManual(null)} onSave={(m) => { resolveLine(panelManual, { kind: 'manual_rate', manual: m }); setPanelManual(null); }} />;
+            return <ManualRateModal key={`pm-${panelManual}`} open processedOnly line={l ? ({ componentName: l.name } as never) : null} currency={loaded.case.currency || 'AED'} quantity={q ? { value: q.value, unit: q.unit } : null} scope={comp} direction={l?.work.action === 'omit' ? 'omission' : 'addition'} existing={existing?.kind === 'manual_rate' ? existing.manual : undefined} onClose={() => setPanelManual(null)} onSave={(m) => { resolveLine(panelManual, { kind: 'manual_rate', manual: m }); setPanelManual(null); }} />;
           })() : null}
           {panelExclude ? <ExcludeModal key={`px-${panelExclude}`} open line={lineById.get(panelExclude) ? { componentName: lineById.get(panelExclude)!.name } : null} onClose={() => setPanelExclude(null)} onSave={(r) => { resolveLine(panelExclude, r); setPanelExclude(null); }} /> : null}
           {panelDefer ? <DeferModal key={`pd-${panelDefer}`} open line={lineById.get(panelDefer) ? { componentName: lineById.get(panelDefer)!.name } : null} onClose={() => setPanelDefer(null)} onSave={(r) => { resolveLine(panelDefer, r); setPanelDefer(null); }} /> : null}
 
           <div className="flex items-center justify-between rounded-lg border border-border bg-card px-5 py-3 shadow-sm">
-            <p className="text-sm text-muted-foreground">Optional correction path: price a single BOQ line by hand. Not needed for the normal journey.</p>
+            <p className="text-sm text-muted-foreground">Standalone what-if calculator. User-entered quantities do not appear in the final PVR form.</p>
             <button type="button" aria-expanded={showManual} onClick={() => setShowManual((v) => !v)} className="rounded-md border border-input bg-card px-3 py-1.5 text-sm font-medium hover:bg-muted">{showManual ? 'Hide manual calculator' : 'Open manual calculator'}</button>
           </div>
 

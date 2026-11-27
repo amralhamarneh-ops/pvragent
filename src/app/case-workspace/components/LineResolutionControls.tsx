@@ -4,7 +4,7 @@ import React, { useMemo, useState } from 'react';
 import { AlertTriangle, ChevronDown, ChevronRight, Undo2 } from 'lucide-react';
 import Modal from '@/components/ui/Modal';
 import { formatSigned } from '@/lib/boq/calc';
-import { priceWithManualRate, type CostSummary, type ExclusionScope, type LineResolution, type ManualRate } from '@/lib/boq/resolutions';
+import { priceWithManualRate, processedPvrScopeKey, sameRateUnit, type RateScope, type CostSummary, type ExclusionScope, type LineResolution, type ManualRate } from '@/lib/boq/resolutions';
 import type { RelatedLine } from '@/lib/boq/matchEngine';
 import type { AgentRun } from '@/lib/boq/agentClient';
 
@@ -32,7 +32,7 @@ export function ResolutionButtons({ line, run, onChooseRow, onManual, onExclude,
           </select>
         ) : null}
       </span>
-      <button type="button" onClick={onManual} className="rounded-md border border-input bg-card px-2.5 py-1 text-xs font-medium hover:bg-muted">Enter manual rate</button>
+      <button type="button" onClick={onManual} className="rounded-md border border-input bg-card px-2.5 py-1 text-xs font-medium hover:bg-muted">{run.drawingQuantitiesOnly?"Cite processed PVR rate":"Enter manual rate"}</button>
       <button type="button" onClick={onExclude} className="rounded-md border border-input bg-card px-2.5 py-1 text-xs font-medium hover:bg-muted">Exclude from this assessment</button>
       {onDefer ? <button type="button" onClick={onDefer} className="rounded-md border border-input bg-card px-2.5 py-1 text-xs font-medium hover:bg-muted">Defer valuation</button> : null}
       <button type="button" onClick={onUnresolved} className="rounded-md border border-input bg-card px-2.5 py-1 text-xs font-medium hover:bg-muted">Leave unresolved</button>
@@ -40,7 +40,7 @@ export function ResolutionButtons({ line, run, onChooseRow, onManual, onExclude,
   );
 }
 
-export function ManualRateModal({ open, line, currency, quantity, direction, existing, onClose, onSave }: {
+export function ManualRateModal({ open, line, currency, quantity, direction, existing, scope, processedOnly, onClose, onSave }: {
   open: boolean;
   line: RelatedLine | null;
   currency: string;
@@ -48,9 +48,14 @@ export function ManualRateModal({ open, line, currency, quantity, direction, exi
   quantity: { value: string; unit: string } | null;
   direction: 'addition' | 'omission';
   existing?: ManualRate;
+  scope?: RateScope | null;
+  processedOnly?: boolean;
   onClose: () => void;
   onSave: (m: ManualRate) => void;
 }) {
+  const [sourceFile, setSourceFile] = useState(existing?.processedPvr?.file ?? '');
+  const [sourcePage, setSourcePage] = useState(existing?.processedPvr?.page ?? '');
+  const [sourceRow, setSourceRow] = useState(existing?.processedPvr?.row ?? '');
   const [rate, setRate] = useState(existing?.value ?? '');
   const [cur, setCur] = useState(existing?.currency ?? currency);
   const [unit, setUnit] = useState(existing?.unit ?? quantity?.unit ?? '');
@@ -58,7 +63,8 @@ export function ManualRateModal({ open, line, currency, quantity, direction, exi
   const [reference, setReference] = useState(existing?.reference ?? '');
   const [attachment, setAttachment] = useState(existing?.attachmentName ?? '');
   const [inc, setInc] = useState(existing?.inclusions ?? { labour: true, materials: true, plant: true, overheads: true, profit: true });
-  const [rateBasis, setRateBasis] = useState(existing?.rateBasis ?? '');
+  const [enteredBasis, setRateBasis] = useState(existing?.rateBasis ?? '');
+  const rateBasis = processedOnly ? 'Processed PVR (pilot only)' : enteredBasis;
   const [exclNote, setExclNote] = useState(existing?.exclusionsNote ?? '');
   const [zeroBasis, setZeroBasis] = useState(existing?.zeroBasis ?? '');
 
@@ -70,22 +76,27 @@ export function ManualRateModal({ open, line, currency, quantity, direction, exi
   if (!line) return null;
   const rateBlank = rate.trim() === '';
   const isZero = !rateBlank && /^0+(\.0+)?$/.test(rate.replace(/,/g, '').trim());
-  const canSave = !!priced && priced.ok && reason.trim().length > 0 && rateBasis.trim().length > 0;
+  const isFallback = rateBasis === 'Processed PVR (pilot only)';
+  const scopedSource = scope && sourceFile.trim() && /^\d+$/.test(sourcePage.trim()) && Number(sourcePage) > 0 && sourceRow.trim()
+    && !!quantity?.unit && sameRateUnit(quantity.unit, unit) && cur.trim().toUpperCase() === currency.trim().toUpperCase()
+    ? { file: sourceFile.trim(), page: sourcePage.trim(), row: sourceRow.trim(), scopeKey: processedPvrScopeKey(scope) } : undefined;
+  const canSave = (!isFallback || !!scopedSource) && !!priced && priced.ok && reason.trim().length > 0 && rateBasis.trim().length > 0;
 
   const save = () => {
     if (!canSave) return;
-    onSave({ value: rate.replace(/,/g, '').trim(), currency: cur.trim() || currency, unit: unit.trim(), reason: reason.trim(), reference: reference.trim(), attachmentName: attachment, inclusions: inc, exclusionsNote: exclNote.trim(), rateBasis: rateBasis.trim(), zeroBasis: isZero ? zeroBasis.trim() : '', enteredBy: ACTOR, enteredAt: new Date().toISOString(), status: 'proposed' });
+    onSave({ processedPvr: isFallback ? scopedSource : undefined, value: rate.replace(/,/g, '').trim(), currency: cur.trim() || currency, unit: unit.trim(), reason: reason.trim(), reference: reference.trim(), attachmentName: attachment, inclusions: inc, exclusionsNote: exclNote.trim(), rateBasis: rateBasis.trim(), zeroBasis: isZero ? zeroBasis.trim() : '', enteredBy: ACTOR, enteredAt: new Date().toISOString(), status: 'proposed' });
   };
 
   return (
-    <Modal open={open} title={`Manual rate · ${line.componentName}`} onClose={onClose} footer={
+    <Modal open={open} title={`${processedOnly?'Processed PVR fallback rate':'Manual rate'} · ${line.componentName}`} onClose={onClose} footer={
       <>
         <button type="button" onClick={onClose} className="rounded-md border border-input bg-card px-3 py-1.5 text-sm font-medium hover:bg-muted">Cancel</button>
         <button type="button" disabled={!canSave} onClick={save} className="rounded-md bg-primary px-4 py-1.5 text-sm font-semibold text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground">Save as proposed rate</button>
       </>
     }>
       <div className="space-y-3 text-sm">
-        <p className="text-muted-foreground">Case-specific override. The source BOQ is not changed and this rate is not reused in other cases. It is saved as <span className="font-medium text-foreground">Manual rate · Proposed</span> and is not commercially approved.</p>
+        <p className="text-muted-foreground">{processedOnly ? 'Use only where no compatible BOQ rate is available. Only the unit rate is taken from the processed PVR; the quantity must come from the current drawings.' : 'Case-specific proposed rate. The source BOQ does not change and the rate is not commercially approved.'}</p>
+        {!quantity && processedOnly && <p className="font-medium">No verified drawing quantity. This line must stay unpriced until the takeoff is available.</p>}
         <div className="grid grid-cols-3 gap-2">
           <div><label htmlFor="mr-rate" className="text-xs text-muted-foreground">Rate</label><input id="mr-rate" inputMode="decimal" value={rate} onChange={(e) => setRate(e.target.value)} className="mt-0.5 w-full rounded-md border border-input bg-card px-2 py-1.5 text-right tabular text-foreground" /></div>
           <div><label htmlFor="mr-cur" className="text-xs text-muted-foreground">Currency</label><input id="mr-cur" value={cur} onChange={(e) => setCur(e.target.value)} className="mt-0.5 w-full rounded-md border border-input bg-card px-2 py-1.5 text-foreground" /></div>
@@ -96,11 +107,19 @@ export function ManualRateModal({ open, line, currency, quantity, direction, exi
         <div><label htmlFor="mr-reason" className="text-xs text-muted-foreground">Reason for the manual rate (required)</label><input id="mr-reason" value={reason} onChange={(e) => setReason(e.target.value)} className="mt-0.5 w-full rounded-md border border-input bg-card px-2 py-1.5 text-foreground" /></div>
         <div className="grid grid-cols-2 gap-2">
           <div><label htmlFor="mr-basis" className="text-xs text-muted-foreground">Rate basis (required)</label>
-            <select id="mr-basis" value={rateBasis} onChange={(e) => setRateBasis(e.target.value)} className="mt-0.5 w-full rounded-md border border-input bg-card px-2 py-1.5 text-foreground">
-              <option value="">Choose…</option><option>Quotation</option><option>Similar BOQ item</option><option>Market rate</option><option>Daywork</option><option>Engineer&apos;s estimate</option><option>Contractor proposal</option><option>Other</option>
+            <select id="mr-basis" disabled={processedOnly} value={rateBasis} onChange={(e) => setRateBasis(e.target.value)} className="mt-0.5 w-full rounded-md border border-input bg-card px-2 py-1.5 text-foreground">
+              <option value="">Choose…</option><option>Quotation</option><option>Similar BOQ item</option><option>Market rate</option><option>Daywork</option><option>Engineer&apos;s estimate</option><option>Contractor proposal</option>{scope ? <option>Processed PVR (pilot only)</option> : null}<option>Other</option>
             </select></div>
           <div><label htmlFor="mr-excl" className="text-xs text-muted-foreground">Rate excludes (optional)</label><input id="mr-excl" value={exclNote} onChange={(e) => setExclNote(e.target.value)} placeholder="Nothing is added to cover this" className="mt-0.5 w-full rounded-md border border-input bg-card px-2 py-1.5 text-foreground" /></div>
         </div>
+        {isFallback ? <fieldset className="space-y-2 rounded border border-border p-2">
+          <legend>Processed PVR evidence (required)</legend>
+          <p>The source line must match the specified work, location, change action, unit and currency. A usable BOQ rate takes precedence. This is a pilot reference, not a BOQ rate or commercial approval.</p>
+          {scope ? <p>{scope.name} · {scope.location || 'No location stated'} · {scope.action}</p> : null}
+          <label className="block">Source filename <input className="rounded border border-border px-2 py-1" value={sourceFile} onChange={(e) => setSourceFile(e.target.value)} /></label>
+          <label className="block">Page number <input className="rounded border border-border px-2 py-1" inputMode="numeric" value={sourcePage} onChange={(e) => setSourcePage(e.target.value)} /></label>
+          <label className="block">Item / row / column (e.g. Engineer’s addition) <input className="rounded border border-border px-2 py-1" value={sourceRow} onChange={(e) => setSourceRow(e.target.value)} /></label>
+        </fieldset> : null}
         <div className="grid grid-cols-2 gap-2">
           <div><label htmlFor="mr-ref" className="text-xs text-muted-foreground">Source / reference (optional)</label><input id="mr-ref" value={reference} onChange={(e) => setReference(e.target.value)} className="mt-0.5 w-full rounded-md border border-input bg-card px-2 py-1.5 text-foreground" /></div>
           <div><label htmlFor="mr-att" className="text-xs text-muted-foreground">Supporting attachment (optional)</label><input id="mr-att" type="file" onChange={(e) => setAttachment(e.target.files?.[0]?.name ?? '')} className="mt-0.5 w-full text-xs text-foreground" />{attachment ? <p className="text-xs text-muted-foreground">{attachment} (name recorded; file not uploaded)</p> : null}</div>
