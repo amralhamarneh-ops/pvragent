@@ -24,6 +24,7 @@ import { writeRunRecord } from '@/lib/boq/runRecord';
 import { resumableDrafts } from '@/lib/docs/scopedDraft';
 import { EMPTY_STATE, DEFAULT_SCENARIO, EMPTY_DECISIONS, describeChange, readDecisions, readResolutionState, reconcileDecisions, staleEffects, writeDecisions, writeResolutionState, type DecisionStore, type LineResolution, type ResolutionState } from '@/lib/boq/resolutions';
 import FinalPvrForm from '@/app/case-workspace/components/FinalPvrForm';
+import ScopeReadinessPanel from '@/app/case-workspace/components/ScopeReadinessPanel';
 import type { FormLine, ProgrammeWhatIf } from '@/lib/pvr/finalForm';
 import { matchesCurrentDrawings } from '@/lib/boq/drawingQuantities';
 import ActivityMappingPanel, { type ScheduleExclusion } from '@/app/case-workspace/components/ActivityMappingPanel';
@@ -620,7 +621,7 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
     const trusted=!!q && !!(calc||fallback);
     return [{
       ...t, disposition:t.disposition==='priced'&&!trusted?'unpriced':t.disposition,
-      signedAmount:trusted?t.signedAmount:null, description:l.name, quantity:q?.value??null, quantityUnit:q?.unit??l.work.unit,
+      signedAmount:trusted?t.signedAmount:null, description:l.name, quantity:q?.value??null, quantityUnit:q?.unit??l.work.unit, quantityAction:component?.action,
       drawingSource:q ? [q.source,q.quote].filter(Boolean).join(' · ') : '',
       rate:fallback ? manual!.value : calc?.rate??null, rateUnit:fallback ? manual!.unit : calc?.boqUnit??'',
       rateSource:fallback ? 'Processed PVR rate (BOQ unavailable): '+l.source : sources ? 'Contract BOQ: '+sources : 'No verified BOQ or cited fallback rate',
@@ -869,7 +870,8 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
           {activeSchedule ? <RealProgrammePanel key={activeSchedule.sha256} source={activeSchedule} references={referenceSchedules}
             confirmedTaskIds={confirmedProgrammeTasks} onScenario={setProgrammeWhatIf} />
             : referenceSchedules.length > 0 ? <p role="status">A processed programme is available. Upload the pre-impact XER separately to compare the two.</p> : null}
-          <FinalPvrForm key={caseId} caseId={caseId} title={c.title} lines={formLines} reportReady={formReady} whatIf={whatIf} blockers={formBlockers} verifyDrawingRevisions={drawingsAreCurrent} />
+          {activeSchedule && formReady && <ScopeReadinessPanel key={activeSchedule.sha256} lines={formLines} model={activeSchedule.model} />}
+          <FinalPvrForm key={caseId} caseId={caseId} title={c.title} lines={formLines} reportReady={formReady} whatIf={whatIf} blockers={formBlockers} drawingNotes={handoff?.openQuestions.filter(q=>q.id.startsWith('referenced-drawing-')).map(q=>q.issue)} verifyDrawingRevisions={drawingsAreCurrent} />
           {itemModal ? (
             <NewItemEntry key={itemModal.existing?.id ?? 'new'} open caseId={caseId} currency={loaded.case.currency || 'AED'} initial={itemModal.draft} existing={itemModal.existing} set={boqSet}
               scopeOptions={(agentRun?.scope.components ?? []).map((c) => ({ id: c.id, label: c.name }))} onClose={() => setItemModal(null)} onSaveItem={saveItem} onAddBoqItem={addBoqItemToScope} newId={() => newId('item')} />
