@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
+import { REPLAY_SPEEDS, replayDelay, type ReplaySpeed } from '@/lib/drawings/replay';
 import SavedDrawingReplay from '@/app/case-workspace/components/SavedDrawingReplay';
 import { DEMO_KEY, REHEARSAL_LIMIT, loadBrowserRehearsal, runBrowserRehearsal, type BrowserRehearsal } from '@/lib/demo/browserRehearsal';
 
@@ -20,6 +21,19 @@ export default function BrowserDemo() {
   const [status, setStatus] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [mappingFrame, setMappingFrame] = useState<number | null>(null);
+  const [mappingPaused, setMappingPaused] = useState(false);
+  const [mappingSpeed, setMappingSpeed] = useState<ReplaySpeed>(1);
+  // Frame zero shows the recorded BOQ import; later frames reveal one saved decision at a time.
+  const mappingCount = run?.changes.length ?? 0;
+  const mappingPlaying = mappingFrame !== null && mappingFrame < mappingCount;
+  const visibleChanges = run?.changes.slice(0, mappingFrame ?? mappingCount) ?? [];
+  useEffect(() => { setMappingFrame(null); setMappingPaused(false); }, [run]);
+  useEffect(() => {
+    if (!mappingPlaying || mappingPaused) return;
+    const timer = window.setTimeout(() => setMappingFrame(n => n === null ? null : Math.min(n + 1, mappingCount)), replayDelay(mappingSpeed) * 2);
+    return () => window.clearTimeout(timer);
+  }, [mappingFrame, mappingCount, mappingPlaying, mappingPaused, mappingSpeed]);
   useEffect(() => {
     try {
       const saved = loadBrowserRehearsal(localStorage.getItem(DEMO_KEY));
@@ -100,9 +114,26 @@ export default function BrowserDemo() {
       <section className="rounded-lg border border-border bg-card p-4" aria-label="Measured quantities and BOQ mapping">
         <h2 className="text-xl font-semibold">Measured quantities and BOQ mapping</h2>
         <p className="text-sm text-muted-foreground">{run.boqRows} BOQ item(s) read. Mappings are proposals, not approvals. Quantities come from the drawing comparison only.</p>
+        <div className="mt-3 flex flex-wrap items-center gap-2" aria-label="BOQ mapping replay controls">
+          <button type="button" onClick={()=>{setMappingFrame(0);setMappingPaused(window.matchMedia('(prefers-reduced-motion: reduce)').matches);}} className="rounded border border-input px-3 py-2 text-sm">Replay BOQ mapping</button>
+          <label className="flex items-center gap-2 text-sm">Mapping replay speed
+            <select aria-label="Mapping replay speed" value={mappingSpeed} onChange={e=>setMappingSpeed(Number(e.target.value) as ReplaySpeed)} className="rounded border border-input bg-card p-1.5">
+              {REPLAY_SPEEDS.map(speed=><option key={speed} value={speed}>{speed}×</option>)}
+            </select>
+          </label>
+          {mappingPlaying ? <>
+            <button type="button" onClick={()=>setMappingPaused(v=>!v)} className="rounded border border-input px-2 py-1.5 text-sm">{mappingPaused ? 'Resume mapping replay' : 'Pause mapping replay'}</button>
+            <button type="button" onClick={()=>setMappingFrame(i=>Math.min((i ?? 0)+1,mappingCount))} className="rounded border border-input px-2 py-1.5 text-sm">Next mapping</button>
+            <button type="button" onClick={()=>setMappingFrame(mappingCount)} className="rounded border border-input px-2 py-1.5 text-sm">Show all mappings</button>
+          </> : null}
+        </div>
+        {mappingFrame !== null ? <p role="status" className="mt-2 text-sm">
+          {mappingFrame === 0 ? `Recorded BOQ import: ${run.boqRows} item(s). Showing the saved mapping decisions next.`
+            : `Mapping replay: ${mappingFrame} of ${mappingCount} decisions shown. No analysis was rerun.`}
+        </p> : null}
         <div className="mt-3 overflow-x-auto"><table className="w-full text-left text-sm">
           <thead><tr className="border-b"><th className="p-2">Drawing change</th><th className="p-2">Measured delta</th><th className="p-2">Proposed BOQ item</th><th className="p-2">Source and review</th></tr></thead>
-          <tbody>{run.changes.map(c=>{
+          <tbody>{visibleChanges.map(c=>{
             const m=run.mappings.find(x=>x.id===c.id);
             return <tr key={c.id} className="align-top border-b">
               <th scope="row" className="p-2">{c.component}</th>
