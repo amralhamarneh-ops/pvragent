@@ -6,6 +6,8 @@ import { analyseDocuments } from '@/lib/drawings/analyse';
 import { buildSavedDrawingReplay, readSavedDrawingReplay, type SavedDrawingReplay } from '@/lib/drawings/replay';
 import type { FileReadiness, ReconciledChange } from '@/lib/drawings/types';
 
+import { isRehearsalSchedule, type RehearsalSchedule } from './scheduleRehearsal';
+
 export type DemoFile = { name: string; bytes: Uint8Array };
 type Source = { name: string; sha256: string; role: string };
 type ProposedBoq = { ref: string; description: string; unit: string; file: string; sheet: string; row: number };
@@ -13,6 +15,7 @@ type Mapping = { id: string; proposal: ProposedBoq | null; reason: string };
 export type BrowserRehearsal = {
   version: 1; savedAt: string; sources: Source[]; reads: FileReadiness[];
   changes: ReconciledChange[]; mappings: Mapping[]; replay: SavedDrawingReplay;
+  schedule?: RehearsalSchedule;
   boqRows: number; events: { step: string; detail: string }[];
 };
 export const DEMO_KEY = 'pvr-browser-rehearsal-v1';
@@ -86,6 +89,9 @@ export function loadBrowserRehearsal(raw: string | null): BrowserRehearsal | nul
           [c.id,c.component,c.description,c.unit,c.changeQty,c.trace.formula,c.trace.drawingRevision].every(x=>typeof x==='string') &&
           [c.addedQty,c.omittedQty,c.netQty].every(x=>x===undefined || typeof x==='string') &&
           Array.isArray(c.sources) && c.sources.every(x=>typeof x==='string')) ||
+        (v.schedule !== undefined && (!isRehearsalSchedule(v.schedule) || v.schedule.mappings.length !== v.changes.length ||
+          new Set(v.schedule.mappings.map(m=>m.id)).size !== v.changes.length ||
+          !v.schedule.mappings.every(m=>v.changes.some(c=>c.id===m.id)))) ||
         v.mappings.length !== v.changes.length || !v.mappings.every(m=>m && typeof m.id==='string' &&
           typeof m.reason==='string' && v.changes.some(c=>c.id===m.id) &&
           (m.proposal===null || (m.proposal && [m.proposal.ref,m.proposal.description,m.proposal.unit,m.proposal.file,m.proposal.sheet].every(x=>typeof x==='string') &&
