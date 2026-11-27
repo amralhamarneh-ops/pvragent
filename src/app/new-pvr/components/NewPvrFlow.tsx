@@ -9,13 +9,13 @@ import DocumentsStep from '@/app/new-pvr/components/DocumentsStep';
 import EvidencePack from '@/app/new-pvr/components/EvidencePack';
 import TriageStep, { type ProjectChoice } from '@/app/new-pvr/components/TriageStep';
 import PrerequisitesStep from '@/app/new-pvr/components/PrerequisitesStep';
-import { AnalysisReadCache, analyseDocuments, type InputFile } from '@/lib/drawings/analyse';
+import { buildSavedDrawingReplay } from '@/lib/drawings/replay';
+import { AnalysisReadCache, analyseDocuments, type AnalysisOutput, type InputFile } from '@/lib/drawings/analyse';
 import DrawingAnalysisPanel, { type PanelDoc } from '@/app/case-workspace/components/DrawingAnalysisPanel';
 import BackgroundJobPanel from '@/app/case-workspace/components/BackgroundJobPanel';
 import { serverExtractor } from '@/lib/drawings/extractClient';
 import { buildHandoff, saveHandoff } from '@/lib/drawings/handoff';
 import { nextVersion } from '@/lib/drawings/snapshot';
-import type { AnalysisResult } from '@/lib/drawings/types';
 import EvidenceDrawer from '@/components/EvidenceDrawer';
 import Modal from '@/components/ui/Modal';
 import JourneyStepper from '@/components/JourneyStepper';
@@ -98,7 +98,7 @@ export default function NewPvrFlow() {
   const [project, setProject] = useState<ProjectChoice | null>(null);
   const [separate, setSeparate] = useState(true);
   const [skipped, setSkipped] = useState<string[]>([]);
-  const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
+  const [analysis, setAnalysis] = useState<AnalysisOutput | null>(null);
   const [analysing, setAnalysing] = useState(false);
   const [analysisError, setAnalysisError] = useState('');
   const [qAnswers, setQAnswers] = useState<Record<string, string>>({});
@@ -117,7 +117,7 @@ export default function NewPvrFlow() {
   const [docMessage, setDocMessage] = useState('');
   const [lastExtracted, setLastExtracted] = useState<{ name: string; text: string }[]>([]);
   const [lastExtractedState, setLastExtractedState] = useState(0);
-  const analysisRef = useRef<AnalysisResult | null>(null);
+  const analysisRef = useRef<AnalysisOutput | null>(null);
   const lastExtractedRef = useRef<{ name: string; text: string }[]>([]);
   useEffect(() => { analysisRef.current = analysis; }, [analysis]);
   useEffect(() => { lastExtractedRef.current = lastExtracted; setLastExtractedState((n) => n + 1); }, [lastExtracted]);
@@ -568,7 +568,7 @@ export default function NewPvrFlow() {
   const docByPath = useMemo(() => new Map(managedDocs.map((d) => [d.path, d])), [managedDocs]);
 
   /** Read the actual uploaded files and analyse them. Nothing typed is required. */
-  const runAnalysis = useCallback(async (answers: Record<string, string> = qAnswers): Promise<AnalysisResult | null> => {
+  const runAnalysis = useCallback(async (answers: Record<string, string> = qAnswers): Promise<AnalysisOutput | null> => {
     const myEpoch = epochRef.current;
     let current = () => epochRef.current === myEpoch;
     setAnalysing(true);
@@ -929,6 +929,7 @@ export default function NewPvrFlow() {
         documents: registry.current.list().map((d) => ({ id: d.id, name: d.path, sha256: d.sha256, version: d.version, role: d.role })),
         analysisVersion: Math.max(1, nextVersion(scopeRef.current) - 1),
       }) : null;
+      if (handoff && current && !current.cancelled) handoff.drawingReplay = buildSavedDrawingReplay(current) ?? undefined;
       const ev = await saveEvidence(caseId, { narrative, handoff, answers: qAnswers });
       if (!ev.saved) notes.push(`The narrative and analysis were not saved to the case: ${ev.error}`);
       if (handoff) saveHandoff(caseId, handoff);

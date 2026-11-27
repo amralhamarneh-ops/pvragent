@@ -1,5 +1,7 @@
 'use client';
 
+import { mergeMatchSnapshotAnswers } from '@/lib/boq/matchSnapshot';
+
 import { getAccessToken } from '@/lib/supabase/client';
 import { cacheGet, cachePut, cacheKey, sha256Hex, DocumentRegistry } from '@/lib/docs/registry';
 import type { DocRecord, DocState } from '@/lib/docs/registry';
@@ -31,7 +33,7 @@ const isSession = (caseId: string) => caseId.startsWith('session-');
 async function storeAllDocuments(caseId: string, reg: DocumentRegistry): Promise<StoreOutcome[]> {
   const out: StoreOutcome[] = [];
   for (const d of reg.list()) {
-    if (d.state === 'stored' || d.state === 'parsed') { out.push({ id: d.id, path: d.path, stored: true, error: '' }); continue; }
+    if (d.storagePath && (d.state === 'stored' || d.state === 'parsed')) { out.push({ id: d.id, path: d.path, stored: true, error: '' }); continue; }
     const bytes = reg.bytesOf(d.id);
     if (!bytes) { out.push({ id: d.id, path: d.path, stored: false, error: 'The file contents are not in this browser. Reconnect the file.' }); continue; }
     // Always mirror locally so a reload in this browser restores contents even if the server is unreachable.
@@ -132,12 +134,13 @@ async function loadEvidence(caseId: string): Promise<{ evidence: EvidenceState |
 }
 
 /** Persist evidence against the case. Browser storage is used only for a labelled temporary case. */
-async function saveEvidence(caseId: string, patch: Partial<EvidenceState>): Promise<{ saved: boolean; persisted: boolean; error: string }> {
+async function saveEvidence(caseId: string, patch: Partial<EvidenceState> & { matchSnapshot?: string }): Promise<{ saved: boolean; persisted: boolean; error: string }> {
   if (isSession(caseId)) {
     try {
       const raw = window.sessionStorage.getItem(EV_PREFIX + caseId);
       const cur: EvidenceState = raw ? (JSON.parse(raw) as EvidenceState) : { narrative: '', handoff: null, answers: {} };
-      window.sessionStorage.setItem(EV_PREFIX + caseId, JSON.stringify({ ...cur, ...patch }));
+      const { answers, matchSnapshot, ...rest } = patch;
+      window.sessionStorage.setItem(EV_PREFIX + caseId, JSON.stringify({ ...cur, ...rest, answers: mergeMatchSnapshotAnswers(cur.answers, answers, matchSnapshot) }));
       return { saved: true, persisted: false, error: '' };
     } catch { return { saved: false, persisted: false, error: 'This browser could not hold the temporary copy.' }; }
   }

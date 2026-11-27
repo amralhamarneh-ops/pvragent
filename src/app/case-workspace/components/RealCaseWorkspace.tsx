@@ -10,6 +10,7 @@ import { newId, selectedImportOf } from '@/lib/boq/store';
 import { remapTarget, staleness, toSavedCalculation, type SavedCalculation } from '@/lib/boq/revisions';
 import type { BoqItemRecord, CalcResult, ChangeDirection } from '@/lib/boq/types';
 import type { BasisKind, DerivationInput } from '@/lib/boq/units';
+import SavedDrawingReplay from '@/app/case-workspace/components/SavedDrawingReplay';
 import AgentBoqReview from '@/app/case-workspace/components/AgentBoqReview';
 import { importSignatureOf, readEvidenceFile, runAgent, outcomeOf, type AgentEvent, type AgentRun } from '@/lib/boq/agentClient';
 import { EMPTY_ANSWERS, type UserAnswers } from '@/lib/boq/matchEngine';
@@ -18,6 +19,7 @@ import { handoffAsEvidence, loadHandoff, normaliseHandoff, type ChangeHandoff } 
 import { loadDrawingManifest, loadEvidence, saveEvidence } from '@/lib/docs/caseDocsClient';
 import { buildBoqModel, EMPTY_INCLUSION, parseInclusion, type BoqInclusionState } from '@/lib/boq/documents';
 import { overlappingItems } from '@/lib/boq/coverage';
+import { makeMatchSnapshot, MATCH_SNAPSHOT_KEY, readMatchSnapshot, type MatchSnapshot } from '@/lib/boq/matchSnapshot';
 import { writeRunRecord } from '@/lib/boq/runRecord';
 import { resumableDrafts } from '@/lib/docs/scopedDraft';
 import { EMPTY_STATE, DEFAULT_SCENARIO, EMPTY_DECISIONS, describeChange, readDecisions, readResolutionState, reconcileDecisions, staleEffects, writeDecisions, writeResolutionState, type DecisionStore, type LineResolution, type ResolutionState } from '@/lib/boq/resolutions';
@@ -69,11 +71,14 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
   const [agentRunning, setAgentRunning] = useState(false);
   const [agentEvents, setAgentEvents] = useState<AgentEvent[]>([]);
   const [agentError, setAgentError] = useState('');
+  const [savedMatches, setSavedMatches] = useState<{ caseId: string; snapshot: MatchSnapshot; drawingsCurrent: boolean; persisted: boolean } | null>(null);
+  const [matchSaveNote, setMatchSaveNote] = useState('');
   const [rawAnswers, setAnswers] = useState<UserAnswers>(EMPTY_ANSWERS);
   const [assessmentConfirmed, setAssessmentConfirmed] = useState(false);
   const [programmeWhatIf, setProgrammeWhatIf] = useState<ProgrammeWhatIf | null>(null);
   const [showManual, setShowManual] = useState(false);
   const [handoff, setHandoff] = useState<ChangeHandoff | null>(null);
+  const [verifiedReplay, setVerifiedReplay] = useState<{ caseId: string; handoff: ChangeHandoff } | null>(null);
   const [resState, setResState] = useState<ResolutionState>(EMPTY_STATE);
   const [partialAccepted, setPartialAccepted] = useState(false);
   /** Which BOQ documents are excluded and which revision is selected per document (persisted with the case evidence). */
@@ -160,8 +165,15 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
       const ev = await loadEvidence(caseId);
       if (cancelled) return;
       setInclusion(parseInclusion(ev.evidence?.answers));
+      const snapshot = readMatchSnapshot(ev.evidence?.answers?.[MATCH_SNAPSHOT_KEY]);
       const fromServer = ev.evidence?.handoff ? normaliseHandoff(ev.evidence.handoff) : null;
       const h = fromServer ?? loadHandoff(caseId);
+      if (snapshot || h?.drawingReplay) {
+        const current = await loadDrawingManifest(caseId);
+        if (cancelled) return;
+        if (snapshot) setSavedMatches({ caseId, snapshot, drawingsCurrent: matchesCurrentDrawings(snapshot.drawings, current), persisted: ev.persisted });
+        if (h?.drawingReplay && matchesCurrentDrawings(h.documents, current)) setVerifiedReplay({caseId, handoff:h});
+      }
       const original = ev.evidence?.narrative ?? h?.originalNarrative ?? '';
       if (original.trim()) setNarrative((cur) => (cur.trim() ? cur : original));
       if (!h) return;
@@ -396,6 +408,7 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
   const analyse = async () => {
     setAgentRunning(true);
     setAgentError('');
+    setMatchSaveNote('');
     setAgentEvents([]);
     setAssessmentConfirmed(false);
     try {
@@ -411,6 +424,13 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
         evidenceUnread: Object.fromEntries(evidence.filter((e) => !e.extracted).map((e) => [e.name, e.note || 'Its content was not extracted.'])),
       });
       setAnswers(EMPTY_ANSWERS);
+      const snapshot = makeMatchSnapshot(outcomeOf(run, EMPTY_ANSWERS), run.importSignature, activeDrawingDocuments, new Date().toISOString());
+      const serialized = JSON.stringify(snapshot);
+      if (snapshot.rows.length && readMatchSnapshot(serialized)) {
+        const save = await saveEvidence(caseId, { matchSnapshot: serialized });
+        if (save.saved) setSavedMatches({ caseId, snapshot, drawingsCurrent: !!handoff && matchesCurrentDrawings(handoff.documents, activeDrawingDocuments), persisted: save.persisted });
+        setMatchSaveNote(save.saved ? (save.persisted ? 'BOQ match preview saved to this case.' : 'BOQ match preview saved in this tab only.') : `BOQ match preview was not saved: ${save.error}`);
+      } else setMatchSaveNote(snapshot.rows.length ? 'The BOQ match preview could not be verified for saving.' : 'This run found no primary BOQ matches with verified drawing quantities to save. An earlier saved preview, if any, is unchanged.');
       // The first completed analysis fixes the baseline the decisions are made against. Later changes mark results stale.
       setSavedFingerprint((cur) => cur ?? makeFingerprint({ boqSignature: activeSignature, scopeKeys: run.scope.components.map((c) => `${c.name}|${c.action}|${c.location}|${c.quantity?.value ?? ''}${c.quantity?.unit ?? ''}`).concat(handoff ? [`handoff:${handoff.analysisVersion ?? ''}:${(handoff.records ?? []).map((r) => `${r.id}:${r.netQty}`).join(',')}`] : []), mapping: mapChoices, documents: evidence.map((e) => `${e.name}:${e.text.length}`).concat([`narrative:${narrative.length}`]) }));
     } catch (e) {
@@ -715,6 +735,27 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
               {handoff.limitations.length > 0 ? <p className="mt-1 text-sm text-muted-foreground">Not processed: {handoff.limitations.join(' | ')}</p> : null}
             </section>
           ) : null}
+
+          {verifiedReplay?.caseId === caseId && handoff === verifiedReplay.handoff && handoff.drawingReplay ? (
+            <SavedDrawingReplay replay={handoff.drawingReplay} changes={handoff.changes} />
+          ) : handoff?.drawingReplay ? (
+            <p className="text-sm text-muted-foreground">Saved drawing replay is unavailable because the active drawings could not be verified.</p>
+          ) : null}
+          {savedMatches?.caseId === caseId && !agentRun ? (
+            <section aria-label="Saved BOQ match preview" className="rounded-lg border border-border bg-card p-4">
+              <h3 className="font-semibold">Saved BOQ match preview</h3>
+              <p className="text-sm text-muted-foreground">Run from {new Date(savedMatches.snapshot.runAt).toLocaleString()}. Review only; not a confirmed valuation.{!savedMatches.persisted ? ' Saved in this tab only.' : ''}</p>
+              {!savedMatches.drawingsCurrent || savedMatches.snapshot.importSignature !== activeSignature ? <p role="status" className="mt-2 text-sm text-warning">Historical result: the source BOQ or drawings have changed or could not be verified.</p> : null}
+              {savedMatches.snapshot.rows.length ? <ul className="mt-2 divide-y divide-border text-sm">
+                {savedMatches.snapshot.rows.map((row, i) => <li key={i} className="py-2">
+                  <p className="font-medium">{row.name} · {row.quantity} → {row.item} {row.description}</p>
+                  <p className="text-muted-foreground">{row.source} · {row.file}{row.note ? ` · ${row.note}` : ''}</p>
+                </li>)}
+              </ul> : <p className="mt-2 text-sm text-muted-foreground">No primary BOQ matches with drawing-measured quantities were saved from this run.</p>}
+              {savedMatches.snapshot.total > savedMatches.snapshot.rows.length ? <p className="text-sm text-muted-foreground">Showing {savedMatches.snapshot.rows.length} of {savedMatches.snapshot.total} saved-run lines.</p> : null}
+            </section>
+          ) : null}
+          {matchSaveNote ? <p role="status" className="text-sm text-muted-foreground">{matchSaveNote}</p> : null}
 
           <AgentBoqReview
             run={agentRun}

@@ -2,11 +2,13 @@
 
 import React, { useEffect, useMemo, useReducer, useState } from 'react';
 import { Check, CircleDashed, Loader2, Pause, Play, RotateCcw, SkipForward, X, AlertTriangle } from 'lucide-react';
+import { REPLAY_SPEEDS, replayDelay, type ReplaySpeed } from '@/lib/drawings/replay';
 import { STAGES, coverageOf, initialPlayback, playbackLabel, playbackReducer, visibleLayerCount, type RunState } from '@/lib/drawings/runState';
 
 interface Props {
   run: RunState;
   streamGeometry?: boolean;
+  replayOnly?: boolean;
   /** Layers in the finished geometry, used only for a Replay after the run has completed. */
   finishedLayers: { name: string; count: number }[];
   onCancel: () => void;
@@ -28,8 +30,9 @@ const useReducedMotion = (): boolean => {
  * Status for a processing run. While the run is live the picture is whatever geometry has actually arrived, so there
  * is no timer here. The only timed reveal is an explicit Replay of a completed run, and it is labelled as one.
  */
-export default function LiveAnalysisPreview({ run, finishedLayers, onCancel, replaying, onReplayStart, onReplayStop, onReveal, streamGeometry = true }: Props) {
+export default function LiveAnalysisPreview({ run, finishedLayers, onCancel, replaying, onReplayStart, onReplayStop, onReveal, streamGeometry = true, replayOnly = false }: Props) {
   const reduced = useReducedMotion();
+  const [speed, setSpeed] = useState<ReplaySpeed>(1);
   const [pb, dispatch] = useReducer(playbackReducer, reduced, initialPlayback);
   const running = run.status === 'running';
   const files = Object.values(run.live);
@@ -39,33 +42,39 @@ export default function LiveAnalysisPreview({ run, finishedLayers, onCancel, rep
   useEffect(() => {
     if (!replaying || pb.paused || pb.skipped || reduced) return;
     if (pb.position >= finishedLayers.length) return;
-    const t = window.setTimeout(() => dispatch({ type: 'tick', available: finishedLayers.length }), 350);
+    const t = window.setTimeout(() => dispatch({ type: 'tick', available: finishedLayers.length }), replayDelay(speed));
     return () => window.clearTimeout(t);
-  }, [replaying, pb.paused, pb.skipped, pb.position, finishedLayers.length, reduced]);
+  }, [replaying, pb.paused, pb.skipped, pb.position, finishedLayers.length, reduced, speed]);
   useEffect(() => { if (replaying && reduced) dispatch({ type: 'skip', available: finishedLayers.length }); }, [replaying, reduced, finishedLayers.length]);
 
   const shown = visibleLayerCount(pb, finishedLayers.length);
   const revealed = useMemo(() => finishedLayers.slice(0, shown).map((l) => l.name), [finishedLayers, shown]);
   useEffect(() => { onReveal(replaying ? revealed : null); }, [replaying, revealed, onReveal]);
-  useEffect(() => { if (replaying && shown >= finishedLayers.length && finishedLayers.length > 0) { /* stay on the finished picture; user ends the replay */ } }, [replaying, shown, finishedLayers.length]);
 
   if (run.status === 'idle') return null;
-  const label = running && !streamGeometry ? 'Processing all supported geometry without live animation' : playbackLabel(run, replaying);
+  const label = running && !streamGeometry ? 'Processing all supported geometry without live animation' : replayOnly && !replaying ? 'Saved drawing comparison ready to replay' : playbackLabel(run, replaying);
 
   return (
-    <section aria-label="Live drawing analysis" className="rounded-lg border border-border bg-card p-4 shadow-sm">
+    <section aria-label={replayOnly ? "Saved drawing replay controls" : "Live drawing analysis"} className="rounded-lg border border-border bg-card p-4 shadow-sm">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h3 className="flex items-center gap-2 text-base font-semibold text-foreground">
             {running ? <Loader2 size={16} className="animate-spin motion-reduce:animate-none" aria-hidden /> : run.status === 'complete' ? <Check size={16} className="text-success" aria-hidden /> : run.status === 'cancelled' ? <X size={16} className="text-muted-foreground" aria-hidden /> : <AlertTriangle size={16} className="text-warning" aria-hidden />}
-            Drawing analysis · {running ? 'in progress' : run.status}
+            {replayOnly ? 'Drawing replay' : 'Drawing analysis'} · {running ? 'in progress' : run.status}
             {replaying ? <span className="rounded bg-muted px-2 py-0.5 text-xs font-semibold text-foreground">Replay</span> : null}
           </h3>
-          <p className="text-xs text-muted-foreground" role="status">{label}. Drawn geometry is what the parser delivered; only the Measurement stage produces quantities.</p>
+          <p className="text-xs text-muted-foreground" role="status">{label}. {replayOnly ? 'No files, quantities or matches are recalculated.' : 'Drawn geometry is what the parser delivered; only the Measurement stage produces quantities.'}</p>
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
+          {finishedLayers.length > 0 && !running ? <label className="flex items-center gap-1.5 text-sm">
+            Replay speed
+            <select aria-label="Replay speed" value={speed} onChange={(e) => setSpeed(Number(e.target.value) as ReplaySpeed)} className="rounded-md border border-input bg-card px-2 py-1.5">
+              {REPLAY_SPEEDS.map((s) => <option key={s} value={s}>{s}×</option>)}
+            </select>
+          </label> : null}
           {replaying ? (
             <>
+              {shown >= finishedLayers.length && !reduced ? <button type="button" onClick={() => dispatch({type:'replay'})} className="inline-flex items-center gap-1 rounded-md border border-input px-2.5 py-1.5 text-sm hover:bg-muted"><RotateCcw size={14} aria-hidden />Replay again</button> : null}
               {pb.paused ? <button type="button" onClick={() => dispatch({ type: 'resume' })} className="inline-flex items-center gap-1 rounded-md border border-input px-2.5 py-1.5 text-sm hover:bg-muted"><Play size={14} aria-hidden />Resume replay</button> : <button type="button" onClick={() => dispatch({ type: 'pause' })} disabled={pb.skipped || shown >= finishedLayers.length} className="inline-flex items-center gap-1 rounded-md border border-input px-2.5 py-1.5 text-sm hover:bg-muted disabled:opacity-50"><Pause size={14} aria-hidden />Pause replay</button>}
               <button type="button" onClick={() => dispatch({ type: 'skip', available: finishedLayers.length })} disabled={pb.skipped} className="inline-flex items-center gap-1 rounded-md border border-input px-2.5 py-1.5 text-sm hover:bg-muted disabled:opacity-50"><SkipForward size={14} aria-hidden />Skip to end</button>
               <button type="button" onClick={onReplayStop} className="inline-flex items-center gap-1 rounded-md border border-input px-2.5 py-1.5 text-sm hover:bg-muted"><X size={14} aria-hidden />End replay</button>
@@ -77,6 +86,7 @@ export default function LiveAnalysisPreview({ run, finishedLayers, onCancel, rep
         </div>
       </div>
 
+      {!replayOnly ? <>
       <ol className="mt-3 grid gap-1.5 sm:grid-cols-4 lg:grid-cols-7" aria-label="Processing stages">
         {STAGES.map((s) => {
           const st = run.stages[s.id];
@@ -118,6 +128,7 @@ export default function LiveAnalysisPreview({ run, finishedLayers, onCancel, rep
           {run.ignored > 0 ? <p className="mt-1 text-xs text-muted-foreground">{run.ignored} late event(s) from a cancelled run or another case were ignored.</p> : null}
         </div>
       </div>
+      </> : null}
     </section>
   );
 }
