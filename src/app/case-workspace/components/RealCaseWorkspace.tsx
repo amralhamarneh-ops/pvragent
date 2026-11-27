@@ -22,7 +22,7 @@ import { writeRunRecord } from '@/lib/boq/runRecord';
 import { resumableDrafts } from '@/lib/docs/scopedDraft';
 import { EMPTY_STATE, DEFAULT_SCENARIO, EMPTY_DECISIONS, describeChange, readDecisions, readResolutionState, reconcileDecisions, staleEffects, writeDecisions, writeResolutionState, type DecisionStore, type LineResolution, type ResolutionState } from '@/lib/boq/resolutions';
 import FinalPvrForm from '@/app/case-workspace/components/FinalPvrForm';
-import type { FormLine, FormProgramme } from '@/lib/pvr/finalForm';
+import type { FormLine, ProgrammeWhatIf } from '@/lib/pvr/finalForm';
 import { matchesCurrentDrawings } from '@/lib/boq/drawingQuantities';
 import ActivityMappingPanel, { type ScheduleExclusion } from '@/app/case-workspace/components/ActivityMappingPanel';
 import NewItemEntry from '@/app/case-workspace/components/NewItemEntry';
@@ -71,7 +71,7 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
   const [agentError, setAgentError] = useState('');
   const [rawAnswers, setAnswers] = useState<UserAnswers>(EMPTY_ANSWERS);
   const [assessmentConfirmed, setAssessmentConfirmed] = useState(false);
-  const [programmeReport, setProgrammeReport] = useState<FormProgramme | null>(null);
+  const [programmeWhatIf, setProgrammeWhatIf] = useState<ProgrammeWhatIf | null>(null);
   const [showManual, setShowManual] = useState(false);
   const [handoff, setHandoff] = useState<ChangeHandoff | null>(null);
   const [resState, setResState] = useState<ResolutionState>(EMPTY_STATE);
@@ -325,8 +325,6 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
   const inputSchedules = useMemo(() => schedLoad?.schedules.filter(s => !referenceOnlyProgramme(s)) ?? [], [schedLoad]);
   const referenceSchedules = useMemo(() => schedLoad?.schedules.filter(referenceOnlyProgramme) ?? [], [schedLoad]);
   const activeSchedule = inputSchedules[schedIdx] ?? null;
-  const includedExecution = sharedLines.filter(l => l.work.executes && !schedExcl[l.lineId] && totalsLines.find(t => t.lineId===l.lineId)?.excludedScope!=='scenario');
-  const soleExecution = includedExecution.length===1 ? includedExecution[0] : undefined;
   const confirmedProgrammeTasks = useMemo(() => mappingProgrammeHash === activeSchedule?.sha256
     ? sharedLines.filter(l => l.work.executes && !schedExcl[l.lineId] && !mapChoices[l.lineId]?.state).flatMap(l => mapChoices[l.lineId]?.activityTaskIds ?? []) : [],
     [mappingProgrammeHash,activeSchedule,sharedLines,schedExcl,mapChoices]);
@@ -403,7 +401,7 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
     try {
       const activeDrawingDocuments = await loadDrawingManifest(caseId);
       const run = await runAgent({ imports: activeSet, narrative, evidence, drawingQuantityHandoff: handoff, activeDrawingDocuments, onEvent: (e) => setAgentEvents((l) => [...l, e]) });
-      setProgrammeReport(null);
+      setProgrammeWhatIf(null);
       setAgentRun(run);
       writeRunRecord(caseId, {
         runAt: new Date().toISOString(),
@@ -611,14 +609,12 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
         ? (mapChoices[l.lineId]?.activityTaskIds??[]).map(id=>activeSchedule?.model.activities.find(a=>(a.taskId??a.id)===id)?.id).filter(Boolean).join(', ') : undefined,
     } satisfies FormLine];
   });
-  const timeForForm = programmeReport && activeSchedule?.fileName===programmeReport.input && soleExecution &&
-    formLines.some(l=>l.lineId===soleExecution.lineId && l.drawingSource && l.mappedActivity===programmeReport.activity) && confirmedProgrammeTasks.length===1
-    ? programmeReport : null;
+  const whatIf=programmeWhatIf && activeSchedule?.fileName===programmeWhatIf.input ? programmeWhatIf : null;
   const formReady=!!agentRun && assessmentConfirmed && !agentStale && !staleNow.length && !resState.costStale && !agentRunning;
   const formBlockers=[
     ...(!agentRun?['Run the drawing-based analysis.']:!formReady?['Review and confirm the current valuation before treating this as a final PVR.']:[]),
     ...(formLines.some(l=>l.disposition==='unpriced'||l.disposition==='deferred'||l.disposition==='held_overlap')?['Some lines are unpriced, deferred, or held for review. The priced subtotal is not the full PVR value.']:[]),
-    ...(!timeForForm?['No independent, full-scope programme result is available. Time impact remains pending.']:[]),
+    'No verified full-scope programme result is available. What-if scenarios do not contribute to PVR time impact.',
   ];
 
   const confirmed = imports.filter((i) => i.confirmedAt);
@@ -830,9 +826,9 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
           ) : null}
 
           {activeSchedule ? <RealProgrammePanel key={activeSchedule.sha256} source={activeSchedule} references={referenceSchedules}
-            confirmedTaskIds={confirmedProgrammeTasks} onScenario={setProgrammeReport} />
+            confirmedTaskIds={confirmedProgrammeTasks} onScenario={setProgrammeWhatIf} />
             : referenceSchedules.length > 0 ? <p role="status">A processed programme is available. Upload the pre-impact XER separately to compare the two.</p> : null}
-          <FinalPvrForm key={caseId} caseId={caseId} title={c.title} lines={formLines} reportReady={formReady} time={timeForForm} blockers={formBlockers} verifyDrawingRevisions={drawingsAreCurrent} />
+          <FinalPvrForm key={caseId} caseId={caseId} title={c.title} lines={formLines} reportReady={formReady} whatIf={whatIf} blockers={formBlockers} verifyDrawingRevisions={drawingsAreCurrent} />
           {itemModal ? (
             <NewItemEntry key={itemModal.existing?.id ?? 'new'} open caseId={caseId} currency={loaded.case.currency || 'AED'} initial={itemModal.draft} existing={itemModal.existing} set={boqSet}
               scopeOptions={(agentRun?.scope.components ?? []).map((c) => ({ id: c.id, label: c.name }))} onClose={() => setItemModal(null)} onSaveItem={saveItem} onAddBoqItem={addBoqItemToScope} newId={() => newId('item')} />

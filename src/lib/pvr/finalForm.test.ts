@@ -5,7 +5,7 @@ const line:FormLine={lineId:'line-1',description:'Install sample barrier',dispos
   quantity:'10',quantityUnit:'m',drawingSource:'Sheet 05 Rev C · entities A–E · 10 m',rate:'32.5',rateUnit:'m',
   rateSource:'Processed PVR rate (BOQ unavailable): ref.pdf p.1 row 2',rateFallback:true,mappedActivity:'TEST-100'};
 const base:FormInput={details:{project:'Example Works',number:'PVR-002',title:'Barrier Change',contract:'C-1'},lines:[line],reportReady:true,
-  time:{before:'2026-01-01',after:'2026-01-04',calendarDays:3,input:'Baseline.xer',activity:'TEST-100'}};
+  whatIf:{before:'2026-01-01',after:'2026-01-04',calendarDays:3,input:'Baseline.xer',activity:'TEST-100'}};
 describe('final PVR form and distinct benchmark data',()=>{
   it('uses the exact active valuation and discloses rate fallback and source inline',()=>{
     const html=renderPvrForm({...base,references:{'line-1':{value:'1,000',unit:'m',citation:'Manual benchmark p.2'}}});
@@ -13,11 +13,24 @@ describe('final PVR form and distinct benchmark data',()=>{
     expect(html).toContain('1 line(s) use cited processed-PVR rates');
     expect(html).toContain('Processed PVR rate (BOQ unavailable): ref.pdf p.1 row 2');
     expect(html).toContain('Drawings less reference: -990 m');
-    expect(html).toContain('3 calendar days in the calculated scenario');
-    expect(html).toContain('FOR REVIEW / UNSIGNED');
+    expect(html).toContain('DRAFT – ASSESSMENT INCOMPLETE');
+  });
+  it.each([0,3])('keeps an arbitrary %i-day scenario for a drawing-measured, priced and mapped line out of formal time impact', calendarDays=>{
+    const html=renderPvrForm({...base,details:{...base.details,clientCommitment:'2026-01-02'},
+      whatIf:{...base.whatIf!,calendarDays}});
+    const [form,annex]=html.split('<div class="annex">');
+    expect(form).toContain('Pending independent programme assessment');
+    expect(form).toContain('DRAFT – ASSESSMENT INCOMPLETE');
+    for (const option of ['No Time Impact','Within Client Commitment Date','Delay to Client Commitment Date']) {
+      expect(form).toContain('☐ '+option);expect(form).not.toContain('☒ '+option);
+    }
+    expect(form).not.toContain('ASSESSMENT COMPLETE');
+    expect(form).not.toContain('2026-01-04');
+    expect(annex).toContain('What-if scenario only (not PVR time impact)');
+    expect(annex).toContain(calendarDays+' calendar days difference');
   });
   it('does not price a narrative or benchmark number when drawing evidence is missing',()=>{
-    const html=renderPvrForm({...base,time:null,lines:[{...line,quantity:'50',drawingSource:''}],
+    const html=renderPvrForm({...base,whatIf:null,lines:[{...line,quantity:'50',drawingSource:''}],
       references:{'line-1':{value:'50',unit:'m',citation:'Manual benchmark p.2'}}});
     expect(html).not.toContain('AED 325.00');expect(html).toContain('DRAFT');
     expect(html).toContain('Not verified from drawings');expect(html).toContain('Pending independent programme assessment');

@@ -25,10 +25,10 @@ export interface FormLine extends TotalsLine {
   rateFallback:boolean;
   mappedActivity?:string;
 }
-export interface FormProgramme {before:string; after:string; calendarDays:number; input:string; activity:string}
+export interface ProgrammeWhatIf {before:string; after:string; calendarDays:number; input:string; activity:string}
 export interface FormInput {
   details:FormDetails; lines:FormLine[]; references?:Record<string,TakeoffReference>;
-  reportReady:boolean; time:FormProgramme|null; blockers?:string[];
+  reportReady:boolean; whatIf?:ProgrammeWhatIf|null; blockers?:string[];
 }
 export function compareTakeoff(line:Pick<FormLine,'quantity'|'quantityUnit'|'drawingSource'>, ref?:TakeoffReference) {
   if (!ref?.citation.trim() || !validateDecimalText(ref.value) || !line.drawingSource || !line.quantity || !validateDecimalText(line.quantity) ||
@@ -46,7 +46,7 @@ const section = (text:string) => '<h2>'+text+'</h2>';
 const primary = (label:string,value:unknown) => '<tr><th>'+e(label)+'</th><td>'+display(value)+'</td></tr>';
 
 export function renderPvrForm(input:FormInput):string {
-  const {details:d,reportReady,time}=input;
+  const {details:d,reportReady,whatIf}=input;
   // Defence in depth: the report never values a line that has not come through a cited drawing takeoff.
   const lines=input.lines.map<FormLine>(l=>l.disposition==='priced' && (!l.drawingSource || !l.quantity || !validateDecimalText(l.quantity))
     ? {...l,disposition:'unpriced',signedAmount:null} : l);
@@ -55,11 +55,10 @@ export function renderPvrForm(input:FormInput):string {
   const pendingCost=!reportReady || totals.mixedCurrency || !total?.complete;
   const pricing=totals.perCurrency.filter(t=>t.pricedSubtotal!==null).map(t=>money(t.pricedSubtotal!,t.currency)).join(' / ');
   const cost=pendingCost ? 'Pending verification'+(pricing?' (priced subtotal only: '+pricing+')':'') : pricing;
-  const timeText=reportReady && time ? (time.calendarDays===0?'0 calendar days in the calculated scenario':e(time.calendarDays)+' calendar days in the calculated scenario') : 'Pending independent programme assessment';
+  // The current scenario tool accepts manually entered working days. It has no full-scope result suitable for official reporting.
+  const timeText='Pending independent programme assessment';
   const commitment = /^\d{4}-\d{2}-\d{2}$/.test(d.clientCommitment??'') ? d.clientCommitment : null;
-  const quantified = reportReady && time;
-  const late = quantified && commitment && time.after>commitment;
-  const timeChoice = [check(!!quantified && time.calendarDays===0)+' No Time Impact',check(!!quantified && time.calendarDays>0 && !!commitment && !late)+' Within Client Commitment Date',check(!!quantified && time.calendarDays>0 && !!late)+' Delay to Client Commitment Date'].join('　　');
+  const timeChoice = ['No Time Impact','Within Client Commitment Date','Delay to Client Commitment Date'].map(label => check(false)+' '+label).join('　　');
   const fallbackCount=lines.filter(l=>l.disposition==='priced'&&l.rateFallback).length;
   const details=DETAILS.slice(0,6).map(([k,label])=>primary(label,d[k])).join('');
   const budget = [DETAILS.slice(12,15),DETAILS.slice(15,18)].map(row=>'<tr>'+row.map(([k,label])=>'<th>'+e(label)+'</th><td>'+display(d[k])+'</td>').join('')+'</tr>').join('');
@@ -87,7 +86,7 @@ export function renderPvrForm(input:FormInput):string {
 <style>
 @page{size:A4;margin:11mm}*{box-sizing:border-box}body{font:10px/1.24 Arial,sans-serif;color:#161616;margin:0 auto;max-width:190mm}h1{text-align:center;font-size:15px;margin:4mm 0 1mm}h2{font-size:10px;text-align:center;background:#191919;color:#fff;margin:2.1mm 0 0;padding:2.5px;print-color-adjust:exact;-webkit-print-color-adjust:exact}p{margin:3px 0}.notice{text-align:center;font-weight:bold;font-size:9px;margin-bottom:2mm}.annex{break-before:page;page-break-before:always}.reason{display:grid;grid-template-columns:1fr 1fr;gap:2px 12px;padding:4px;border:1px solid #333}.remarks{white-space:pre-wrap;overflow-wrap:anywhere}table{width:100%;border-collapse:collapse;table-layout:fixed}th,td{border:1px solid #333;text-align:left;padding:3px 4px;vertical-align:top;overflow-wrap:anywhere;white-space:pre-wrap}th{font-weight:600;background:#f0f0f0;print-color-adjust:exact;-webkit-print-color-adjust:exact}.identity th{width:27%}.grid th{width:19%}.grid td{width:14.33%}.approval td{height:23px}.section-heading{margin-top:3px;font-weight:bold}.annex thead{display:table-header-group}.annex tr{break-inside:avoid}small{display:block;margin-top:3px;color:#474747}.classification{text-align:right;font-size:8px;margin-top:2mm}@media screen{body{padding:10px}.annex{margin-top:22px}}@media print{h2{break-after:avoid}}
 </style></head><body>
-<h1>POTENTIAL VARIATION REQUEST</h1><p class="notice">${pendingCost || !time || !reportReady?'DRAFT – ASSESSMENT INCOMPLETE':'ASSESSMENT COMPLETE – FOR REVIEW / UNSIGNED'}</p>
+<h1>POTENTIAL VARIATION REQUEST</h1><p class="notice">DRAFT – ASSESSMENT INCOMPLETE</p>
 ${section('PVR DETAILS')}
 <table class="identity">${details}<tr><th>PVR Reasoning</th><td><p class="section-heading">Justification of Proposed Variation</p><p>${display(d.reasoning)}</p><p class="section-heading">Estimated Time Impact of Proposed Variation</p><p>${timeText}</p><p class="section-heading">Estimated Cost Impact of Proposed Variation</p><p>${cost}${fallbackCount?' · '+fallbackCount+' line(s) use cited processed-PVR rates because usable BOQ rates were unavailable. See Annex.':''}</p></td></tr></table>
 ${section('CHANGE REASON')}<div class="reason">${REASONS.map(r=>'<div>'+check(d.reasons?.includes(r)??false)+' '+e(r)+(r==='Other' && d.otherReason?' – '+e(d.otherReason):'')+'</div>').join('')}</div>
@@ -101,7 +100,7 @@ ${section('APPROVALS')}<table class="approval"><thead><tr><th style="width:13%">
 <p>Quantity source: drawings only. Reference quantities are for comparison only and do not contribute to cost or programme calculations.</p>
 <p>Contract BOQ rates take precedence. Cited processed-PVR rates are disclosed per line; they are not approved rates.</p>
 ${input.blockers?.length?'<ul>'+input.blockers.map(b=>'<li>'+e(b)+'</li>').join('')+'</ul>':''}
-${time && reportReady?'<p>Programme input: '+e(time.input)+' · '+e(time.activity)+' · '+e(time.before)+' → '+e(time.after)+'. This does not establish entitlement.</p>':''}
+${whatIf?'<p><strong>What-if scenario only (not PVR time impact):</strong> '+e(whatIf.input)+' · '+e(whatIf.activity)+' · '+e(whatIf.before)+' → '+e(whatIf.after)+' ('+e(whatIf.calendarDays)+' calendar days difference). Duration input was entered manually; the variation impact has not been verified.</p>':''}
 <table><thead><tr><th>Scope / Activity</th><th>Drawing Takeoff</th><th>Unit Rate and Source</th><th>Cost Impact</th><th>Processed Quantity (Comparison Only)</th></tr></thead><tbody>${audit || '<tr><td colspan="5">No valuation lines available.</td></tr>'}</tbody></table>
 </div></body></html>`;
 }

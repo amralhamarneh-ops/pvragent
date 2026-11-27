@@ -3,7 +3,7 @@
 import {useEffect,useMemo,useState} from 'react';
 import {compareProgrammeEvidence,describeProgramme,testDurationChange,validateRealProgramme} from '@/lib/assessment/realProgramme';
 import {drivingPath} from '@/lib/assessment/cpmEngine';
-import type {FormProgramme} from '@/lib/pvr/finalForm';
+import type {ProgrammeWhatIf} from '@/lib/pvr/finalForm';
 import type {LoadedSchedule} from '@/lib/mapping/scheduleLoader';
 
 export function referenceOnlyProgramme(s: Pick<LoadedSchedule,'subrole'|'fileName'>) {
@@ -13,7 +13,7 @@ export function referenceOnlyProgramme(s: Pick<LoadedSchedule,'subrole'|'fileNam
 }
 
 export default function RealProgrammePanel({source,references,confirmedTaskIds,onScenario}: {
-  source:LoadedSchedule; references:LoadedSchedule[]; confirmedTaskIds:string[]; onScenario?:(result:FormProgramme|null)=>void;
+  source:LoadedSchedule; references:LoadedSchedule[]; confirmedTaskIds:string[]; onScenario?:(result:ProgrammeWhatIf|null)=>void;
 }) {
   const [refId,setRefId]=useState('');
   const [taskId,setTaskId]=useState('');
@@ -62,7 +62,7 @@ export default function RealProgrammePanel({source,references,confirmedTaskIds,o
             <label>Additional working days <input type="number" min="1" max="3650" step="1" className="rounded border border-input bg-card px-2 py-1 w-24" value={days} onChange={e=>{setDays(e.target.value);setRun(false);}} /></label>
             <button type="button" className="rounded border border-input px-3 py-2" disabled={!validSelection || !Number.isSafeInteger(Number(days)) || Number(days)<1 || Number(days)>3650} onClick={()=>setRun(true)}>Calculate duration scenario</button>
           </div>}
-          {scenario && <p role="status">Calculated forecast: <strong>{scenario.after}</strong>, {scenario.calendarDays} calendar days after {scenario.before}.{codes.length ? ` Driving path to finish: ${codes.join(' → ')}.` : ''}</p>}
+          {scenario && <p role="status">What-if forecast: <strong>{scenario.after}</strong>, {scenario.calendarDays} calendar days after {scenario.before}.{codes.length ? ` Driving path to finish: ${codes.join(' → ')}.` : ''}</p>}
           {run && !scenario && <p role="status">The duration scenario did not produce a reliable result.</p>}
         </div>)}
       {evidence && <div className="rounded border border-input p-3 text-sm space-y-2">

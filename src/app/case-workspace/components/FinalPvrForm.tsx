@@ -12,7 +12,7 @@ const selectOptions: Partial<Record<typeof DETAILS[number][0],string[]>> = {
 const fieldClass = 'w-full rounded border border-input bg-card px-2 py-1.5 text-foreground';
 const EMPTY_REFERENCE:TakeoffReference={value:'',unit:'',citation:''};
 
-export default function FinalPvrForm({caseId,title,lines,reportReady,time,blockers,verifyDrawingRevisions}:Props) {
+export default function FinalPvrForm({caseId,title,lines,reportReady,whatIf,blockers,verifyDrawingRevisions}:Props) {
   const [details,setDetails]=useState<FormDetails>({});
   const [refs,setRefs]=useState<Record<string,TakeoffReference>>({});
   const [loaded,setLoaded]=useState(false);
@@ -34,7 +34,7 @@ export default function FinalPvrForm({caseId,title,lines,reportReady,time,blocke
   const formBlockers=useMemo(()=>[...(!identification?['Complete the project name, contract number, PVR number and title to prepare a final form.']:[]),...(blockers??[])],[identification,blockers]);
   const html=async()=>{
     const stale=ready && !(await verifyDrawingRevisions());
-    return renderPvrForm({details,lines,references:refs,reportReady:ready&&!stale,time,blockers:stale
+    return renderPvrForm({details,lines,references:refs,reportReady:ready&&!stale,whatIf,blockers:stale
       ? [...formBlockers,'The source drawing revisions have changed or are unavailable. Rerun the takeoff before using these results.']
       : formBlockers});
   };
