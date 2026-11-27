@@ -3,7 +3,7 @@ import { calculateChange, recordsFromImport } from './calc';
 import { buildRowContext, type RowContext } from './context';
 import { planConversion } from './units';
 import { retrieveCandidates, type RetrievedCandidate } from './retrieve';
-import { priceWithManualRate, validProcessedPvrRate, summariseCost, type CostSummary, type ExclusionScope, type LineResolution, type ManualRate, type Resolutions, type SummaryLine } from './resolutions';
+import { priceWithManualRate, validProcessedPvrRate, PROCESSED_PVR_RATE_BASIS, summariseCost, type CostSummary, type ExclusionScope, type LineResolution, type ManualRate, type Resolutions, type SummaryLine } from './resolutions';
 import type { BoqImport, BoqItemRecord, CalcResult } from './types';
 import type { ChangeScope, CandidateBrief, ModelMatchResult, ScopeComponent } from './scope';
 
@@ -189,7 +189,7 @@ export function assemble(set: BoqSet, scope: ChangeScope, proposal: ModelMatchRe
     // Several primaries for one component that are not distinct work: ask, do not price them all.
     let primary = primaries[0];
     if (primaries.length > 1 && !chosen) {
-      needs.push({ id: `amb-${comp.id}`, kind: 'ambiguous_candidates', componentId: comp.id, title: `Several BOQ items fit: ${comp.name}`, issue: 'More than one item could price this component. Only one should be valued so the work is not priced twice.', evidence: comp.evidence, proposal: `${byId.get(primaries[0].rowId)?.ref ?? ''} looks closest.`, options: primaries.map((p) => { const it = byId.get(p.rowId)!; return { id: p.rowId, label: `${it.ref} ${it.description.slice(0, 50)} (${it.unit}) · ${it.sourceFile}`, rowId: p.rowId }; }) });
+      needs.push({ id: `amb-${comp.id}`, kind: 'ambiguous_candidates', componentId: comp.id, title: `Several BOQ items fit: ${comp.name}`, issue: 'More than one item could price this component. Only one should be valued so the work is not priced twice.', evidence: comp.evidence, proposal: `${byId.get(primaries[0].rowId)?.ref ?? ''} looks closest.`, options: primaries.map((p) => { const it = byId.get(p.rowId)!; return { id: p.rowId, label: `${it.ref} ${it.description.slice(0, 50)} (${it.unit}) · ${it.sourceFile}`, rowId: p.rowId }; }).concat({ id: '__none__', label: 'None of these rows match', rowId: '__none__' }) });
       primary = undefined as unknown as typeof primaries[0];
     }
 
@@ -216,8 +216,18 @@ export function assemble(set: BoqSet, scope: ChangeScope, proposal: ModelMatchRe
       } else if (l.valued) valuedRows.set(primary.rowId, { componentId: comp.id });
       lines.push(l);
       for (const a of alternatives.filter((x) => x.rowId !== primary.rowId)) { const al = toLine(a, 'alternative'); al.valued = false; al.alternativesFor = l.item.ref; al.status = 'needs_input'; al.statusNote = 'Alternative candidate for the same component. Not valued.'; lines.push(al); }
-    } else if (primaries.length > 1) {
-      for (const p of primaries) { const al = toLine(p, 'alternative'); al.valued = false; al.status = 'needs_input'; al.statusNote = 'Candidate awaiting your choice. Not valued.'; lines.push(al); }
+    } else {
+      // Keep alternatives-only scope visible and unpriced; a model suggestion is not consent to use a fallback.
+      const candidates = primaries.length > 1 ? primaries : alternatives.filter((p) => !answers.excluded[p.rowId]);
+      for (const p of candidates) { const al = toLine(p, 'alternative'); al.valued = false; al.status = 'needs_input'; al.statusNote = 'Candidate awaiting your choice. Not valued.'; lines.push(al); }
+      const reason = 'No primary BOQ item is selected. Review the candidates or confirm no matching BOQ item.';
+      unmatched.push({ componentId: comp.id, name: comp.name, reason });
+      if (primaries.length === 0) needs.push({
+        id: `amb-${comp.id}`, kind: 'ambiguous_candidates', componentId: comp.id,
+        title: `Review possible BOQ items: ${comp.name}`, issue: reason, evidence: comp.evidence, proposal: 'Choose a BOQ item or confirm that none apply.',
+        options: candidates.map((p) => ({ id: p.rowId, label: byId.get(p.rowId)!.ref, rowId: p.rowId }))
+          .concat({ id: '__none__', label: 'None of these rows match', rowId: '__none__' }),
+      });
     }
   }
 
@@ -252,6 +262,7 @@ export function assemble(set: BoqSet, scope: ChangeScope, proposal: ModelMatchRe
   const deferredOnly: AssessmentOutcome['deferredOnly'] = [];
   const resolutions = answers.resolutions ?? {};
   const usedPvrRows = new Set<string>();
+  const usedPvrScopes: ScopeComponent[] = [];
   for (const comp of scope.components) {
     const res = resolutions[comp.id];
     if (!res) continue;
@@ -282,20 +293,38 @@ export function assemble(set: BoqSet, scope: ChangeScope, proposal: ModelMatchRe
 
     if (res.kind === 'manual_rate') {
       if (!q) continue;
-      const fallback = res.manual.processedPvr;
-      const fallbackRow = fallback ? JSON.stringify([fallback.file, String(Number(fallback.page)), fallback.row].map((v) => v.trim().toLowerCase())) : '';
+      const fallback = res.manual.processedPvr != null || res.manual.rateBasis === PROCESSED_PVR_RATE_BASIS;
+      let fallbackRow = '';
       if (fallback) {
-        // A selected, usable BOQ rate wins. A fallback cannot bypass a
-        // unit conflict, unanswered scope/BOQ selection, or duplicate pricing.
+        // A usable BOQ rate wins. A fallback cannot bypass a unit conflict,
+        // unanswered scope/BOQ selection, or duplicate pricing.
         if (primaryLine?.calc?.ok) continue;
-        const blocked = (primaryLine?.calc && !primaryLine.calc.ok && primaryLine.calc.kind !== 'unpriced')
+        const verified = validProcessedPvrRate(res.manual, comp, q.unit, currency);
+        if (verified) {
+          const source = res.manual.processedPvr!;
+          fallbackRow = JSON.stringify([source.file, String(Number(source.page)), source.row].map((v) => v.trim().replace(/\s+/g, ' ').toLowerCase()));
+        }
+        const selected = answers.chosenRow[comp.id];
+        const possibleRows = shortlist[comp.id] ?? [];
+        const candidateIsPriced = ({ item, specConflict }: RetrievedCandidate) =>
+          !specConflict && !answers.excluded[item.id] && item.currency.toUpperCase() === currency.toUpperCase()
+          && calculateChange({ direction, quantity: q.value, quantityUnit: q.unit, item }).ok;
+        const hasUnreviewedBoqOption = !selected && possibleRows.some((candidate) =>
+          candidate.item.id !== primaryLine?.item.id && candidateIsPriced(candidate));
+        const duplicateWork = usedPvrScopes.some((prior) => sameWork(prior, comp)) || lines.some((l) => {
+          if (l.componentId === comp.id || !l.valued || l.excluded || l.deferred || !l.calc?.ok) return false;
+          const other = compById.get(l.componentId);
+          const resolution = resolutions[l.componentId];
+          return other && resolution?.kind !== 'excluded' && resolution?.kind !== 'deferred' && sameWork(other, comp);
+        });
+        const blocked = !verified || (primaryLine?.calc && !primaryLine.calc.ok && primaryLine.calc.kind !== 'unpriced')
           || primaryLine?.specConflict
           || (primaryLine && !['identity', 'same_dimension'].includes(planConversion(q.unit, primaryLine.item.unit).kind))
           || potentials.some((p) => p.componentId === comp.id)
-          || needs.some((n) => n.componentId === comp.id && ['ambiguous_candidates', 'overlap', 'missing_dimension', 'unit_mismatch'].includes(n.kind))
-          || (!primaryLine && answers.chosenRow[comp.id] !== '__none__' && lines.some((l) => l.componentId === comp.id))
-          || usedPvrRows.has(fallbackRow)
-          || !validProcessedPvrRate(res.manual, comp, q.unit, currency);
+          || needs.some((n) => n.kind === 'overlap' ? (n.componentId === comp.id || n.options.some((option) => option.rowId === primaryLine?.item.id))
+            : n.componentId === comp.id && ['ambiguous_candidates', 'missing_dimension', 'unit_mismatch'].includes(n.kind))
+          || (!primaryLine && selected !== '__none__' && lines.some((l) => l.componentId === comp.id))
+          || hasUnreviewedBoqOption || duplicateWork || usedPvrRows.has(fallbackRow);
         if (blocked) {
           needs.push({ id: `pvr-fallback-${comp.id}`, kind: 'missing_rate', componentId: comp.id,
             title: `Processed PVR rate not applied: ${comp.name}`,
@@ -306,7 +335,7 @@ export function assemble(set: BoqSet, scope: ChangeScope, proposal: ModelMatchRe
       }
       const priced = priceWithManualRate({ quantity: q.value, quantityUnit: q.unit, rate: res.manual.value, rateUnit: res.manual.unit, currency: res.manual.currency, direction, zeroBasis: res.manual.zeroBasis, requireZeroBasis: true });
       if (!priced.ok) continue; // A rejected pairing is never applied silently; the editor reports why.
-      if (fallback) usedPvrRows.add(fallbackRow);
+      if (fallback) { usedPvrRows.add(fallbackRow); usedPvrScopes.push(comp); }
       const base: RelatedLine = primaryLine ?? {
         key: `${comp.id}|manual`, componentId: comp.id, componentName: comp.name,
         item: manualItem(comp.id, comp.name, res.manual),

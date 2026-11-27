@@ -26,6 +26,7 @@ import { buildCoverage } from '@/lib/boq/coverage';
 import { importSignatureOf } from '@/lib/boq/agentClient';
 import { readRunRecord } from '@/lib/boq/runRecord';
 import RequireSignIn from '@/components/RequireSignIn';
+import { isProcessedPvrFile } from '@/lib/intake/processedReference';
 import { classifyOne, demoPack, type ClassifiedFile, type FileRole, type IncomingFile, type TriageResult } from '@/lib/intake/triage';
 import { computeReadiness, primaryAction } from '@/lib/intake/readiness';
 import type { DocGroup } from '@/lib/intake/docGroups';
@@ -550,7 +551,7 @@ export default function NewPvrFlow() {
         id: d.id, path: d.path, name: d.name, role: d.role, subrole: d.subrole ?? '', metadata: d.metadata ?? {}, roleManual: !!d.roleManual,
         hasBytes: !missingBytes.has(d.path) && registry.current.hasBytes(d.path), stateLabel: DOC_STATE_LABEL[d.state], stateDetail: d.stateDetail,
         stateTone: STATE_TONE[d.state] ?? STATE_TONE.uploaded, version: d.version, size: d.size, sha256: d.sha256,
-        categoryLabel: categoryLabel(d.role, d.metadata), subroleLabel: subroleLabel(d.role, d.subrole),
+        categoryLabel: categoryLabel(d.role, d.metadata, d.path), subroleLabel: subroleLabel(d.role, d.subrole),
       });
     }
     return out;
@@ -559,7 +560,7 @@ export default function NewPvrFlow() {
   }, [incoming, missingBytes, registryVersion]);
 
   /** Documents handed to the drawing analysis panel: the same registry rows, with their real bytes. */
-    const panelDocs: PanelDoc[] = useMemo(() => managedDocs.map((d) => ({ id: d.id, name: d.path, sha256: d.sha256, role: d.role, bytes: registry.current.bytesOf(d.id) })), [managedDocs]); // eslint-disable-line react-hooks/exhaustive-deps
+    const panelDocs: PanelDoc[] = useMemo(() => managedDocs.filter((d) => d.role !== 'reference' && !isProcessedPvrFile(d.path)).map((d) => ({ id: d.id, name: d.path, sha256: d.sha256, role: d.role, bytes: registry.current.bytesOf(d.id) })), [managedDocs]); // eslint-disable-line react-hooks/exhaustive-deps
   const docByPath = useMemo(() => new Map(managedDocs.map((d) => [d.path, d])), [managedDocs]);
 
   /** Read the actual uploaded files and analyse them. Nothing typed is required. */
@@ -571,6 +572,7 @@ export default function NewPvrFlow() {
     try {
       const inputs: InputFile[] = [];
       for (const f of files) {
+        if (f.role === 'reference' || isProcessedPvrFile(f.path)) continue;
         inputs.push({ name: f.name, bytes: registry.current.bytesByPath(f.path), role: f.role });
       }
       const manual = manualQty.trim() && manualComponent.trim() ? { quantity: [{ componentId: manualComponent.trim(), value: manualQty.trim(), unit: manualUnit }] } : undefined;
@@ -759,7 +761,7 @@ export default function NewPvrFlow() {
     const run = realCase ? readRunRecord(realCase.id) : null;
     const docs = registry.current.list().filter((d) => incoming.some((i) => i.path === d.path)).map((d) => {
       const stored = d.state === 'stored' || d.state === 'parsed' || !!d.storagePath;
-      return { id: d.id, name: d.name, category: categoryLabel(d.role, d.metadata), role: d.role, sha256: d.sha256, version: d.version, stored, storageDetail: stored ? '' : d.stateDetail, state: d.state, stateDetail: d.stateDetail, hasBytes: registry.current.hasBytes(d.path) };
+      return { id: d.id, name: d.name, category: categoryLabel(d.role, d.metadata, d.path), role: d.role, sha256: d.sha256, version: d.version, stored, storageDetail: stored ? '' : d.stateDetail, state: d.state, stateDetail: d.stateDetail, hasBytes: registry.current.hasBytes(d.path) };
     });
     return buildCoverage(
       docs,
@@ -922,7 +924,7 @@ export default function NewPvrFlow() {
         documents: registry.current.list().map((d) => ({ id: d.id, name: d.path, sha256: d.sha256, version: d.version, role: d.role })),
         analysisVersion: Math.max(1, nextVersion(scopeRef.current) - 1),
       }) : null;
-      const ev = await saveEvidence(caseId, { narrative, ...(handoff ? { handoff } : {}), answers: qAnswers });
+      const ev = await saveEvidence(caseId, { narrative, handoff, answers: qAnswers });
       if (!ev.saved) notes.push(`The narrative and analysis were not saved to the case: ${ev.error}`);
       if (handoff) saveHandoff(caseId, handoff);
       setCaseFor(scopeRef.current, caseId);

@@ -1,8 +1,9 @@
 'use client';
 
-import {useMemo,useState} from 'react';
+import {useEffect,useMemo,useState} from 'react';
 import {compareProgrammeEvidence,describeProgramme,testDurationChange,validateRealProgramme} from '@/lib/assessment/realProgramme';
 import {drivingPath} from '@/lib/assessment/cpmEngine';
+import type {FormProgramme} from '@/lib/pvr/finalForm';
 import type {LoadedSchedule} from '@/lib/mapping/scheduleLoader';
 
 export function referenceOnlyProgramme(s: Pick<LoadedSchedule,'subrole'|'fileName'>) {
@@ -11,8 +12,8 @@ export function referenceOnlyProgramme(s: Pick<LoadedSchedule,'subrole'|'fileNam
     (!/\b(?:pre|before)[ -]?impact\b/i.test(name) && /\b(?:impacted|impact|post[- ]?impact)\b/i.test(name));
 }
 
-export default function RealProgrammePanel({source,references,confirmedTaskIds}: {
-  source:LoadedSchedule; references:LoadedSchedule[]; confirmedTaskIds:string[];
+export default function RealProgrammePanel({source,references,confirmedTaskIds,onScenario}: {
+  source:LoadedSchedule; references:LoadedSchedule[]; confirmedTaskIds:string[]; onScenario?:(result:FormProgramme|null)=>void;
 }) {
   const [refId,setRefId]=useState('');
   const [taskId,setTaskId]=useState('');
@@ -26,6 +27,11 @@ export default function RealProgrammePanel({source,references,confirmedTaskIds}:
   const options=source.model.activities.filter(a=>confirmedTaskIds.includes(a.taskId??a.id) && a.kind==='task' && !a.actualFinish);
   const validSelection=options.some(a=>(a.taskId??a.id)===taskId);
   const scenario=useMemo(()=>run && checked && validSelection ? testDurationChange(checked,taskId,Number(days)) : null,[run,checked,validSelection,taskId,days]);
+  useEffect(()=>{
+    const activity=source.model.activities.find(a=>(a.taskId??a.id)===taskId)?.id;
+    onScenario?.(scenario && activity ? {before:scenario.before,after:scenario.after,calendarDays:scenario.calendarDays,input:source.fileName,activity} : null);
+    return ()=>onScenario?.(null);
+  },[scenario,source,taskId,onScenario]);
   const endpoint=scenario && checked?.network?.activities.find(a=>a.type==='milestone_finish' && scenario.result.activities[a.id]?.earlyFinish===scenario.after);
   const path=endpoint && scenario ? drivingPath(scenario.result,endpoint.id) : [];
   const codes=path.map(id=>source.model.activities.find(a=>(a.taskId??a.id)===id)?.id??id);

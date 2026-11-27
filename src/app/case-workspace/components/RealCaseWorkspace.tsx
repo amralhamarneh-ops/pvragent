@@ -15,13 +15,15 @@ import { importSignatureOf, readEvidenceFile, runAgent, outcomeOf, type AgentEve
 import { EMPTY_ANSWERS, type UserAnswers } from '@/lib/boq/matchEngine';
 import type { EvidenceDoc } from '@/lib/boq/scope';
 import { handoffAsEvidence, loadHandoff, normaliseHandoff, type ChangeHandoff } from '@/lib/drawings/handoff';
-import { loadEvidence, saveEvidence } from '@/lib/docs/caseDocsClient';
+import { loadDrawingManifest, loadEvidence, saveEvidence } from '@/lib/docs/caseDocsClient';
 import { buildBoqModel, EMPTY_INCLUSION, parseInclusion, type BoqInclusionState } from '@/lib/boq/documents';
 import { overlappingItems } from '@/lib/boq/coverage';
 import { writeRunRecord } from '@/lib/boq/runRecord';
 import { resumableDrafts } from '@/lib/docs/scopedDraft';
-import { D } from '@/lib/assessment/decimal';
 import { EMPTY_STATE, DEFAULT_SCENARIO, EMPTY_DECISIONS, describeChange, readDecisions, readResolutionState, reconcileDecisions, staleEffects, writeDecisions, writeResolutionState, type DecisionStore, type LineResolution, type ResolutionState } from '@/lib/boq/resolutions';
+import FinalPvrForm from '@/app/case-workspace/components/FinalPvrForm';
+import type { FormLine, FormProgramme } from '@/lib/pvr/finalForm';
+import { matchesCurrentDrawings } from '@/lib/boq/drawingQuantities';
 import ActivityMappingPanel, { type ScheduleExclusion } from '@/app/case-workspace/components/ActivityMappingPanel';
 import NewItemEntry from '@/app/case-workspace/components/NewItemEntry';
 import { ExcludeModal, ManualRateModal } from '@/app/case-workspace/components/LineResolutionControls';
@@ -69,6 +71,7 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
   const [agentError, setAgentError] = useState('');
   const [rawAnswers, setAnswers] = useState<UserAnswers>(EMPTY_ANSWERS);
   const [assessmentConfirmed, setAssessmentConfirmed] = useState(false);
+  const [programmeReport, setProgrammeReport] = useState<FormProgramme | null>(null);
   const [showManual, setShowManual] = useState(false);
   const [handoff, setHandoff] = useState<ChangeHandoff | null>(null);
   const [resState, setResState] = useState<ResolutionState>(EMPTY_STATE);
@@ -238,7 +241,9 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
   }, [rawAnswers, resState.resolutions, reconciled.active, lineToComponent]);
 
   const currentOutcome = useMemo(() => (agentRun ? outcomeOf(agentRun, answers) : null), [agentRun, answers]);
-  const sharedDetailed = useMemo(() => buildSharedLinesDetailed(agentRun?.scope ?? null, currentOutcome, items2, loaded?.case?.currency ?? 'AED'), [agentRun, currentOutcome, items2, loaded]);
+  // Free-entry items are kept as notes for review, not priced in the drawing-based PVR.
+  const reviewItems = useMemo(() => items2.map(i => ({...i,quantity:null,rate:null})), [items2]);
+  const sharedDetailed = useMemo(() => buildSharedLinesDetailed(agentRun?.scope ?? null, currentOutcome, reviewItems, loaded?.case?.currency ?? 'AED'), [agentRun, currentOutcome, reviewItems, loaded]);
   const sharedLines = sharedDetailed.lines;
   const lineById = useMemo(() => new Map(sharedLines.map((l) => [l.lineId, l])), [sharedLines]);
   const boqSet = useMemo(() => (activeSet.length ? buildBoqSet(activeSet) : null), [activeSet]);
@@ -320,6 +325,11 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
   const inputSchedules = useMemo(() => schedLoad?.schedules.filter(s => !referenceOnlyProgramme(s)) ?? [], [schedLoad]);
   const referenceSchedules = useMemo(() => schedLoad?.schedules.filter(referenceOnlyProgramme) ?? [], [schedLoad]);
   const activeSchedule = inputSchedules[schedIdx] ?? null;
+  const includedExecution = sharedLines.filter(l => l.work.executes && !schedExcl[l.lineId] && totalsLines.find(t => t.lineId===l.lineId)?.excludedScope!=='scenario');
+  const soleExecution = includedExecution.length===1 ? includedExecution[0] : undefined;
+  const confirmedProgrammeTasks = useMemo(() => mappingProgrammeHash === activeSchedule?.sha256
+    ? sharedLines.filter(l => l.work.executes && !schedExcl[l.lineId] && !mapChoices[l.lineId]?.state).flatMap(l => mapChoices[l.lineId]?.activityTaskIds ?? []) : [],
+    [mappingProgrammeHash,activeSchedule,sharedLines,schedExcl,mapChoices]);
 
   // A changed programme invalidates choices that pointed at its activities.
   useEffect(() => {
@@ -391,7 +401,9 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
     setAgentEvents([]);
     setAssessmentConfirmed(false);
     try {
-      const run = await runAgent({ imports: activeSet, narrative, evidence, onEvent: (e) => setAgentEvents((l) => [...l, e]) });
+      const activeDrawingDocuments = await loadDrawingManifest(caseId);
+      const run = await runAgent({ imports: activeSet, narrative, evidence, drawingQuantityHandoff: handoff, activeDrawingDocuments, onEvent: (e) => setAgentEvents((l) => [...l, e]) });
+      setProgrammeReport(null);
       setAgentRun(run);
       writeRunRecord(caseId, {
         runAt: new Date().toISOString(),
@@ -410,38 +422,21 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
     }
   };
 
+  const drawingsAreCurrent = async () => !!handoff && matchesCurrentDrawings(handoff.documents, await loadDrawingManifest(caseId));
   const confirmAssessment = async () => {
     if (!agentRun || !selectedImport || !loaded?.case) return;
+    if (agentStale || !(await drawingsAreCurrent())) {
+      setAssessmentConfirmed(false);
+      toast.error('The BOQ or drawing revisions changed or cannot be verified. Rerun the current drawing-based assessment.');
+      return;
+    }
     const outcome = outcomeOf(agentRun, answers);
     const heldIds = new Set(sharedLines.filter((s) => s.heldForOverlap).map((s) => s.componentId));
-    const lines = outcome.lines.filter((l) => l.valued && !l.excluded && !l.deferred && !heldIds.has(l.componentId) && (l.manual || (l.calc && l.calc.ok)));
-    // Priced assessment items (quantity and rate both given) are part of the cost. Unpriced ones stay unpriced, never zero.
-    const pricedItems = items2.filter((it) => it.quantity !== null && it.rate !== null && !heldIds.has(it.id) && !answers.resolutions?.[it.linkedScope || it.id] && !decisions.decisions[`new|${it.id}`]);
-    if (lines.length === 0 && pricedItems.length === 0) { toast.error('There are no priced lines to confirm.'); return; }
+    const lines = outcome.lines.filter((l) => l.quantityOrigin === 'Measured from geometry' && l.valued && !l.excluded && !l.deferred && !heldIds.has(l.componentId) && (l.manual || (l.calc && l.calc.ok)));
+    if (lines.length === 0) { toast.error('There are no priced drawing-based lines to confirm.'); return; }
     setSavingCalc(true);
     let saved = 0; let failed = '';
     let list = calcs;
-    for (const it of pricedItems) {
-      const owner = selectedImport;
-      const qty = it.quantity as string; const rate = it.rate as string;
-      const mul = D(qty).mul(D(rate));
-      const signed = it.changeType === 'omission' ? mul.neg().toString() : mul.toString();
-      let record: SavedCalculation = {
-        id: newId('calc'), caseId: loaded.case.id, createdAt: new Date().toISOString(),
-        description: `${it.description} · Assessment item · Proposed${it.supportingReference ? ` (${it.supportingReference})` : ''}`,
-        direction: it.changeType === 'omission' ? 'omission' : 'addition',
-        importId: owner.id, importRevision: owner.revision, importFileName: owner.source.fileName, importSha256: owner.source.sha256,
-        itemId: `new:${it.id}`, itemRef: 'NEW-ITEM', itemDescription: it.description, sheet: 'Assessment item', rowNumber: 0, rateCell: '',
-        rate, currency: it.currency, boqUnit: it.uom, quantity: qty, quantityUnit: it.uom, convertedQuantity: qty,
-        signedAmount: signed, formula: `${it.changeType === 'omission' ? '−' : '+'} ${qty} ${it.uom} × ${rate} ${it.currency}/${it.uom} = ${signed} ${it.currency}`,
-        conversion: { type: 'identity', originalQuantity: qty, originalUnit: it.uom, derivedQuantity: qty, derivedUnit: it.uom, derivation: 'Assessment item entered in its own unit', supportingInputs: [], basis: null },
-        reviewedAgainstImportId: null,
-      };
-      const out = await persistCalculation(record, list);
-      if (!out.saved) { failed = out.error; break; }
-      list = [...list, record]; saved += 1;
-    }
-    if (failed) { setSavingCalc(false); setCalcs(list); toast.error(`Confirmed ${saved} line(s). Stopped: ${failed}`); return; }
     for (const l of lines) {
       const owner = activeSet.find((i) => i.id === l.item.importId) ?? selectedImport;
       let record: SavedCalculation;
@@ -594,6 +589,38 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
   }
 
   const c = loaded.case;
+  const formLines: FormLine[] = sharedLines.flatMap(l => {
+    const t = totalsLines.find(row => row.lineId===l.lineId);
+    if (!t) return [];
+    const component=agentRun?.scope.components.find(c=>c.id===l.componentId);
+    const q=l.origin!=='new_item' && component?.quantity?.origin==='measured_from_geometry' ? component.quantity : null;
+    const price=currentOutcome?.lines.find(p=>p.componentId===l.componentId && p.role==='primary');
+    const calc=price?.calc?.ok ? price.calc : null;
+    const manual=price?.manual?.rate;
+    const fallback=!!manual?.processedPvr;
+    const sources=calc?.sources.map(s=>[s.file,[s.sheet,s.rateCell].filter(Boolean).join('!')].filter(Boolean).join(' · ')).join('; ');
+    const trusted=!!q && !!(calc||fallback);
+    return [{
+      ...t, disposition:t.disposition==='priced'&&!trusted?'unpriced':t.disposition,
+      signedAmount:trusted?t.signedAmount:null, description:l.name, quantity:q?.value??null, quantityUnit:q?.unit??l.work.unit,
+      drawingSource:q ? [q.source,q.quote].filter(Boolean).join(' · ') : '',
+      rate:fallback ? manual!.value : calc?.rate??null, rateUnit:fallback ? manual!.unit : calc?.boqUnit??'',
+      rateSource:fallback ? 'Processed PVR rate (BOQ unavailable): '+l.source : sources ? 'Contract BOQ: '+sources : 'No verified BOQ or cited fallback rate',
+      rateFallback:fallback,
+      mappedActivity:mappingProgrammeHash === activeSchedule?.sha256 && !mapChoices[l.lineId]?.state
+        ? (mapChoices[l.lineId]?.activityTaskIds??[]).map(id=>activeSchedule?.model.activities.find(a=>(a.taskId??a.id)===id)?.id).filter(Boolean).join(', ') : undefined,
+    } satisfies FormLine];
+  });
+  const timeForForm = programmeReport && activeSchedule?.fileName===programmeReport.input && soleExecution &&
+    formLines.some(l=>l.lineId===soleExecution.lineId && l.drawingSource && l.mappedActivity===programmeReport.activity) && confirmedProgrammeTasks.length===1
+    ? programmeReport : null;
+  const formReady=!!agentRun && assessmentConfirmed && !agentStale && !staleNow.length && !resState.costStale && !agentRunning;
+  const formBlockers=[
+    ...(!agentRun?['Run the drawing-based analysis.']:!formReady?['Review and confirm the current valuation before treating this as a final PVR.']:[]),
+    ...(formLines.some(l=>l.disposition==='unpriced'||l.disposition==='deferred'||l.disposition==='held_overlap')?['Some lines are unpriced, deferred, or held for review. The priced subtotal is not the full PVR value.']:[]),
+    ...(!timeForForm?['No independent, full-scope programme result is available. Time impact remains pending.']:[]),
+  ];
+
   const confirmed = imports.filter((i) => i.confirmedAt);
 
   return (
@@ -765,7 +792,7 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
                     </li>
                   ))}
                 </ul>
-              ) : <p className="mt-1 text-sm text-muted-foreground">Add an existing BOQ item or create a new assessment item for scope the BOQ does not cover. It stays in this case and never changes the source BOQ.</p>}
+              ) : <p className="mt-1 text-sm text-muted-foreground">Assessment items are notes until the scope has a verified drawing takeoff. They do not contribute manually entered quantities or prices to the PVR form.</p>}
             </section>
           ) : null}
 
@@ -803,8 +830,9 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
           ) : null}
 
           {activeSchedule ? <RealProgrammePanel key={activeSchedule.sha256} source={activeSchedule} references={referenceSchedules}
-            confirmedTaskIds={mappingProgrammeHash === activeSchedule.sha256 ? sharedLines.filter(l => l.work.executes && !schedExcl[l.lineId] && !mapChoices[l.lineId]?.state).flatMap(l => mapChoices[l.lineId]?.activityTaskIds ?? []) : []} />
+            confirmedTaskIds={confirmedProgrammeTasks} onScenario={setProgrammeReport} />
             : referenceSchedules.length > 0 ? <p role="status">A processed programme is available. Upload the pre-impact XER separately to compare the two.</p> : null}
+          <FinalPvrForm key={caseId} caseId={caseId} title={c.title} lines={formLines} reportReady={formReady} time={timeForForm} blockers={formBlockers} verifyDrawingRevisions={drawingsAreCurrent} />
           {itemModal ? (
             <NewItemEntry key={itemModal.existing?.id ?? 'new'} open caseId={caseId} currency={loaded.case.currency || 'AED'} initial={itemModal.draft} existing={itemModal.existing} set={boqSet}
               scopeOptions={(agentRun?.scope.components ?? []).map((c) => ({ id: c.id, label: c.name }))} onClose={() => setItemModal(null)} onSaveItem={saveItem} onAddBoqItem={addBoqItemToScope} newId={() => newId('item')} />
@@ -813,15 +841,15 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
           {panelManual ? (() => {
             const l = lineById.get(panelManual);
             const comp = agentRun?.scope.components.find((c) => c.id === l?.componentId);
-            const q = l ? (answers.quantity[l.componentId] ?? comp?.quantity ?? (l.work.quantity ? { value: l.work.quantity, unit: l.work.unit } : null)) : null;
+            const q = l ? (comp?.quantity ?? null) : null;
             const existing = l ? answers.resolutions?.[l.componentId] : undefined;
-            return <ManualRateModal key={`pm-${panelManual}`} open line={l ? ({ componentName: l.name } as never) : null} currency={loaded.case.currency || 'AED'} quantity={q ? { value: q.value, unit: q.unit } : null} scope={comp} direction={l?.work.action === 'omit' ? 'omission' : 'addition'} existing={existing?.kind === 'manual_rate' ? existing.manual : undefined} onClose={() => setPanelManual(null)} onSave={(m) => { resolveLine(panelManual, { kind: 'manual_rate', manual: m }); setPanelManual(null); }} />;
+            return <ManualRateModal key={`pm-${panelManual}`} open processedOnly line={l ? ({ componentName: l.name } as never) : null} currency={loaded.case.currency || 'AED'} quantity={q ? { value: q.value, unit: q.unit } : null} scope={comp} direction={l?.work.action === 'omit' ? 'omission' : 'addition'} existing={existing?.kind === 'manual_rate' ? existing.manual : undefined} onClose={() => setPanelManual(null)} onSave={(m) => { resolveLine(panelManual, { kind: 'manual_rate', manual: m }); setPanelManual(null); }} />;
           })() : null}
           {panelExclude ? <ExcludeModal key={`px-${panelExclude}`} open line={lineById.get(panelExclude) ? { componentName: lineById.get(panelExclude)!.name } : null} onClose={() => setPanelExclude(null)} onSave={(r) => { resolveLine(panelExclude, r); setPanelExclude(null); }} /> : null}
           {panelDefer ? <DeferModal key={`pd-${panelDefer}`} open line={lineById.get(panelDefer) ? { componentName: lineById.get(panelDefer)!.name } : null} onClose={() => setPanelDefer(null)} onSave={(r) => { resolveLine(panelDefer, r); setPanelDefer(null); }} /> : null}
 
           <div className="flex items-center justify-between rounded-lg border border-border bg-card px-5 py-3 shadow-sm">
-            <p className="text-sm text-muted-foreground">Optional correction path: price a single BOQ line by hand. Not needed for the normal journey.</p>
+            <p className="text-sm text-muted-foreground">Standalone what-if calculator. User-entered quantities do not appear in the final PVR form.</p>
             <button type="button" aria-expanded={showManual} onClick={() => setShowManual((v) => !v)} className="rounded-md border border-input bg-card px-3 py-1.5 text-sm font-medium hover:bg-muted">{showManual ? 'Hide manual calculator' : 'Open manual calculator'}</button>
           </div>
 

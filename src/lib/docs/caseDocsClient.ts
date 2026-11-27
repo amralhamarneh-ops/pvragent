@@ -64,6 +64,18 @@ async function storeAllDocuments(caseId: string, reg: DocumentRegistry): Promise
   return out;
 }
 
+/** Metadata only: checks a saved takeoff against the active drawing revisions, without downloading CAD files. */
+export async function loadDrawingManifest(caseId: string): Promise<ChangeHandoff['documents']> {
+  if (isSession(caseId)) return [];
+  try {
+    const res = await fetch(`/api/boq-cases/${encodeURIComponent(caseId)}/documents`, { cache: 'no-store', headers: await authHeaders() });
+    const data = await json<{ documents: ServerDoc[] }>(res);
+    return res.ok ? (data.documents ?? []).filter((d) => d.role === 'drawings').map((d) => ({
+      id: d.id, name: d.path, sha256: d.sha256, version: d.version, role: d.role,
+    })) : [];
+  } catch { return []; }
+}
+
 export interface RestoreOutcome { restored: number; needReconnect: { id: string; path: string; reason: string }[]; error: string }
 
 /**

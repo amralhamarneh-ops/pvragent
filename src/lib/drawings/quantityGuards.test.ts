@@ -51,9 +51,9 @@ describe('CAD quantity guardrails', () => {
   });
 
   it('blocks a typical detail companion PDF from generating installed CAD or stated quantities', async () => {
-    const files = [dwg('GR-51_Ver1.dxf', dxf(6, ...line('GUARD-RAIL', 12))), dwg('GR-51_Ver2.dxf', dxf(6, ...line('GUARD-RAIL', 15))), dwg('GR-51_Ver2.pdf', rows('pdf'))];
+    const files = [dwg('GR-51_Ver1.dxf', dxf(6, ...line('GUARD-RAIL', 12))), dwg('shop/GR-51_Ver2.dxf', dxf(6, ...line('GUARD-RAIL', 15))), dwg('plots/GR-51_Ver2.pdf', rows('pdf'))];
     const result = await analyseDocuments({files, narrative:'', extractor: async (n) => ({kind:'text', ok:true, doc:{name:n, method:'pdf-text',truncated:false,limitation:'',pages:[{page:1,text:'DRAWING TITLE\nGUARD RAIL\nSINGLE FACE TYPICAL DETAILS\n 1.77 m\nContractor shall submit layout drawings'}]}})});
-    expect(result.drawings.find(d=>d.fileName.endsWith('Ver2.dxf'))?.detailOnlyEvidence).toBe('GR-51_Ver2.pdf');
+    expect(result.drawings.find(d=>d.fileName.endsWith('Ver2.dxf'))?.detailOnlyEvidence).toBe('plots/GR-51_Ver2.pdf');
     expect(result.pairs[0]?.validated).toBe(false);
     expect(result.changes).toHaveLength(0);
   });

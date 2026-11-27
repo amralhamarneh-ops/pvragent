@@ -32,7 +32,7 @@ export function ResolutionButtons({ line, run, onChooseRow, onManual, onExclude,
           </select>
         ) : null}
       </span>
-      <button type="button" onClick={onManual} className="rounded-md border border-input bg-card px-2.5 py-1 text-xs font-medium hover:bg-muted">Enter manual rate</button>
+      <button type="button" onClick={onManual} className="rounded-md border border-input bg-card px-2.5 py-1 text-xs font-medium hover:bg-muted">{run.drawingQuantitiesOnly?"Cite processed PVR rate":"Enter manual rate"}</button>
       <button type="button" onClick={onExclude} className="rounded-md border border-input bg-card px-2.5 py-1 text-xs font-medium hover:bg-muted">Exclude from this assessment</button>
       {onDefer ? <button type="button" onClick={onDefer} className="rounded-md border border-input bg-card px-2.5 py-1 text-xs font-medium hover:bg-muted">Defer valuation</button> : null}
       <button type="button" onClick={onUnresolved} className="rounded-md border border-input bg-card px-2.5 py-1 text-xs font-medium hover:bg-muted">Leave unresolved</button>
@@ -40,7 +40,7 @@ export function ResolutionButtons({ line, run, onChooseRow, onManual, onExclude,
   );
 }
 
-export function ManualRateModal({ open, line, currency, quantity, direction, existing, scope, onClose, onSave }: {
+export function ManualRateModal({ open, line, currency, quantity, direction, existing, scope, processedOnly, onClose, onSave }: {
   open: boolean;
   line: RelatedLine | null;
   currency: string;
@@ -49,6 +49,7 @@ export function ManualRateModal({ open, line, currency, quantity, direction, exi
   direction: 'addition' | 'omission';
   existing?: ManualRate;
   scope?: RateScope | null;
+  processedOnly?: boolean;
   onClose: () => void;
   onSave: (m: ManualRate) => void;
 }) {
@@ -62,7 +63,8 @@ export function ManualRateModal({ open, line, currency, quantity, direction, exi
   const [reference, setReference] = useState(existing?.reference ?? '');
   const [attachment, setAttachment] = useState(existing?.attachmentName ?? '');
   const [inc, setInc] = useState(existing?.inclusions ?? { labour: true, materials: true, plant: true, overheads: true, profit: true });
-  const [rateBasis, setRateBasis] = useState(existing?.rateBasis ?? '');
+  const [enteredBasis, setRateBasis] = useState(existing?.rateBasis ?? '');
+  const rateBasis = processedOnly ? 'Processed PVR (pilot only)' : enteredBasis;
   const [exclNote, setExclNote] = useState(existing?.exclusionsNote ?? '');
   const [zeroBasis, setZeroBasis] = useState(existing?.zeroBasis ?? '');
 
@@ -86,14 +88,15 @@ export function ManualRateModal({ open, line, currency, quantity, direction, exi
   };
 
   return (
-    <Modal open={open} title={`Manual rate · ${line.componentName}`} onClose={onClose} footer={
+    <Modal open={open} title={`${processedOnly?'Processed PVR fallback rate':'Manual rate'} · ${line.componentName}`} onClose={onClose} footer={
       <>
         <button type="button" onClick={onClose} className="rounded-md border border-input bg-card px-3 py-1.5 text-sm font-medium hover:bg-muted">Cancel</button>
         <button type="button" disabled={!canSave} onClick={save} className="rounded-md bg-primary px-4 py-1.5 text-sm font-semibold text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground">Save as proposed rate</button>
       </>
     }>
       <div className="space-y-3 text-sm">
-        <p className="text-muted-foreground">Case-specific override. The source BOQ is not changed and this rate is not reused in other cases. It is saved as <span className="font-medium text-foreground">Manual rate · Proposed</span> and is not commercially approved.</p>
+        <p className="text-muted-foreground">{processedOnly ? 'Use only where no compatible BOQ rate is available. Only the unit rate is taken from the processed PVR; the quantity must come from the current drawings.' : 'Case-specific proposed rate. The source BOQ does not change and the rate is not commercially approved.'}</p>
+        {!quantity && processedOnly && <p className="font-medium">No verified drawing quantity. This line must stay unpriced until the takeoff is available.</p>}
         <div className="grid grid-cols-3 gap-2">
           <div><label htmlFor="mr-rate" className="text-xs text-muted-foreground">Rate</label><input id="mr-rate" inputMode="decimal" value={rate} onChange={(e) => setRate(e.target.value)} className="mt-0.5 w-full rounded-md border border-input bg-card px-2 py-1.5 text-right tabular text-foreground" /></div>
           <div><label htmlFor="mr-cur" className="text-xs text-muted-foreground">Currency</label><input id="mr-cur" value={cur} onChange={(e) => setCur(e.target.value)} className="mt-0.5 w-full rounded-md border border-input bg-card px-2 py-1.5 text-foreground" /></div>
@@ -104,7 +107,7 @@ export function ManualRateModal({ open, line, currency, quantity, direction, exi
         <div><label htmlFor="mr-reason" className="text-xs text-muted-foreground">Reason for the manual rate (required)</label><input id="mr-reason" value={reason} onChange={(e) => setReason(e.target.value)} className="mt-0.5 w-full rounded-md border border-input bg-card px-2 py-1.5 text-foreground" /></div>
         <div className="grid grid-cols-2 gap-2">
           <div><label htmlFor="mr-basis" className="text-xs text-muted-foreground">Rate basis (required)</label>
-            <select id="mr-basis" value={rateBasis} onChange={(e) => setRateBasis(e.target.value)} className="mt-0.5 w-full rounded-md border border-input bg-card px-2 py-1.5 text-foreground">
+            <select id="mr-basis" disabled={processedOnly} value={rateBasis} onChange={(e) => setRateBasis(e.target.value)} className="mt-0.5 w-full rounded-md border border-input bg-card px-2 py-1.5 text-foreground">
               <option value="">Choose…</option><option>Quotation</option><option>Similar BOQ item</option><option>Market rate</option><option>Daywork</option><option>Engineer&apos;s estimate</option><option>Contractor proposal</option>{scope ? <option>Processed PVR (pilot only)</option> : null}<option>Other</option>
             </select></div>
           <div><label htmlFor="mr-excl" className="text-xs text-muted-foreground">Rate excludes (optional)</label><input id="mr-excl" value={exclNote} onChange={(e) => setExclNote(e.target.value)} placeholder="Nothing is added to cover this" className="mt-0.5 w-full rounded-md border border-input bg-card px-2 py-1.5 text-foreground" /></div>

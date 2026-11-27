@@ -113,8 +113,8 @@ export async function analyseDocuments(args: AnalyseArgs): Promise<AnalysisOutpu
   const stated: StatedQuantity[] = [];
   const drawings: DrawingFile[] = [];
   const extracted: { name: string; text: string }[] = [];
-  const detailCompanions = new Map<string, string>();
-  const stemOf = (n: string) => n.replace(/\.[^.]+$/, '').toLowerCase();
+  const detailCompanions = new Map<string, string[]>();
+  const stemOf = (n: string) => (n.split(/[\\/]/).at(-1) ?? n).replace(/\.[^.]+$/, '').toLowerCase();
   const documents: ExtractedDocument[] = [];
   const schedules: { fileName: string; model: ScheduleModel }[] = [];
   const runId = args.runId ?? 'run';
@@ -241,7 +241,10 @@ export async function analyseDocuments(args: AnalyseArgs): Promise<AnalysisOutpu
             }
             return false;
           });
-          if (detail) detailCompanions.set(stemOf(f.name), f.name);
+          if (detail) {
+            const stem = stemOf(f.name);
+            detailCompanions.set(stem, [...(detailCompanions.get(stem) ?? []), f.name]);
+          }
           else stated.push(...extractStatedQuantities(txt, f.name, 'document_stated'));
           dates.push(...classifyDates(txt, { source: f.name, documentKind: 'other' }));
           extracted.push({ name: f.name, text: txt });
@@ -314,7 +317,7 @@ export async function analyseDocuments(args: AnalyseArgs): Promise<AnalysisOutpu
   emit('alignment', 'started', `Pairing ${drawings.length} drawing(s) and checking units and alignment`);
   for (const d of drawings) {
     const companion = detailCompanions.get(stemOf(d.fileName));
-    if (companion) d.detailOnlyEvidence = companion;
+    if (companion?.length === 1 && drawings.filter((file) => stemOf(file.fileName) === stemOf(d.fileName)).length === 1) d.detailOnlyEvidence = companion[0];
   }
   const pairing = pairDrawings(drawings);
   const pairs: DrawingPair[] = [...pairing.pairs];

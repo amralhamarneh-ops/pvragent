@@ -37,11 +37,17 @@ export type RateScope = { id: string; name: string; action: string; location: st
 export const processedPvrScopeKey = (scope: RateScope) => JSON.stringify(
   [scope.id, scope.name, scope.action, scope.location, scope.specification].map((s) => s.trim().toLowerCase()),
 );
+export const PROCESSED_PVR_RATE_BASIS = 'Processed PVR (pilot only)';
+
 export function validProcessedPvrRate(rate: ManualRate, scope: RateScope, quantityUnit: string, caseCurrency: string): boolean {
   const p = rate.processedPvr;
-  return !!p && !!p.file.trim() && /^\d+$/.test(p.page.trim()) && Number(p.page) > 0 && !!p.row.trim()
-    && !!quantityUnit.trim() && !!rate.unit.trim() && sameRateUnit(quantityUnit, rate.unit)
-    && rate.currency.trim().toUpperCase() === caseCurrency.trim().toUpperCase()
+  const hasText = (v: unknown): v is string => typeof v === 'string' && v.trim().length > 0;
+  return !!p && hasText(p.file) && hasText(p.page) && /^\d+$/.test(p.page.trim())
+    && Number.isSafeInteger(Number(p.page)) && Number(p.page) > 0 && hasText(p.row)
+    && hasText(rate.value) && hasText(rate.reason) && hasText(rate.enteredBy)
+    && hasText(rate.enteredAt) && Number.isFinite(Date.parse(rate.enteredAt)) && rate.status === 'proposed'
+    && hasText(quantityUnit) && hasText(rate.unit) && sameRateUnit(quantityUnit, rate.unit)
+    && hasText(caseCurrency) && hasText(rate.currency) && rate.currency.trim().toUpperCase() === caseCurrency.trim().toUpperCase()
     && p.scopeKey === processedPvrScopeKey(scope);
 }
 
