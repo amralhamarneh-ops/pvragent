@@ -33,6 +33,10 @@ function hash(s: string): number { let h = 0; for (const c of s) h = (h * 31 + c
 const title = (n: string, rev: string, extra = '') => ({ kind: 'TEXT' as const, text: `DWG NO: ${n}  REV: ${rev} ${extra}` });
 const road = (len: number): Ent => ({ kind: 'LWPOLYLINE', layer: 'ROAD-CL', handle: 'A1', pts: [[0, 0], [len, 0]] });
 const pave = (len: number, w: number): Ent => ({ kind: 'LWPOLYLINE', layer: 'ROAD-PAVE', handle: 'A2', closed: true, pts: [[0, 0], [len, 0], [len, w], [0, w]] });
+// Existing geometry stays identical across revisions. Extensions use separate measured entities;
+// a whole revised entity is deliberately treated as omission/addition until overlap is established.
+const extendRoad = (from: number, to: number): Ent => ({ kind:'LWPOLYLINE',layer:'ROAD-CL',handle:'A3',pts:[[from,0],[to,0]] });
+const extendPave = (from: number, to: number, w: number): Ent => ({ kind:'LWPOLYLINE',layer:'ROAD-PAVE',handle:'A4',closed:true,pts:[[from,0],[to,0],[to,w],[from,w]] });
 const lamps = (n: number): Ent[] => Array.from({ length: n }, (_, i) => ({ kind: 'INSERT' as const, layer: 'ROAD-LIGHT', handle: 'L' + i, at: [i * 50, 5] as [number, number], name: 'LAMP' }));
 
 const enc = (s: string) => new TextEncoder().encode(s);
@@ -53,7 +57,7 @@ describe('revision comparison helper', () => {
 describe('valid revision pair measured from real DXF content', () => {
   it('starts without any typed quantity or event date and returns evidence-linked changes', async () => {
     const original = dxf([title('R4-001', 'B', 'ISSUED 05/10/2026'), road(5000), pave(5000, 7), ...lamps(2)]);
-    const revised = dxf([title('R4-001', 'C', 'ISSUED 20/10/2026'), road(7000), pave(7000, 7), ...lamps(4)]);
+    const revised = dxf([title('R4-001', 'C', 'ISSUED 20/10/2026'), road(5000), extendRoad(5000,7000), pave(5000,7), extendPave(5000,7000,7), ...lamps(4)]);
     const r = await analyseDocuments({ files: [f('r4-rev-b.dxf', original), f('r4-rev-c.dxf', revised)], narrative: '' });
     expect(r.pairs).toHaveLength(1);
     expect(r.pairs[0].original.titleBlock?.revision).toBe('B');
@@ -75,13 +79,22 @@ describe('valid revision pair measured from real DXF content', () => {
 
   it('measures millimetre drawings in metres', async () => {
     const a = dxf([title('R4-002', 'A'), road(5_000_000)], 4);
-    const b = dxf([title('R4-002', 'B'), road(7_000_000)], 4);
+    const b = dxf([title('R4-002', 'B'), road(5_000_000), extendRoad(5_000_000,7_000_000)], 4);
     const r = await analyseDocuments({ files: [f('a.dxf', a), f('b.dxf', b)], narrative: '' });
     expect(r.changes.find((c) => c.component === 'ROAD-CL')?.changeQty).toBe('2000');
   });
 
+  it('does not net replacement geometry just because a handle persists', async () => {
+    const a = dxf([title('R4-009', 'A'), road(5000)]);
+    const b = dxf([title('R4-009', 'B'), road(7000)]);
+    const out = await analyseDocuments({ files:[f('a.dxf',a),f('b.dxf',b)],narrative:'' });
+    const changes=out.changes.filter(c=>c.component==='ROAD-CL');
+    expect(changes.map(c=>[c.change,c.changeQty])).toEqual([['added','7000'],['removed','-5000']]);
+    expect(changes.map(c=>Number(c.changeQty)).reduce((a,b)=>a+b,0)).toBe(2000);
+  });
+
   it('reports a removal as a negative change', async () => {
-    const a = dxf([title('R4-003', 'A'), road(7000)]);
+    const a = dxf([title('R4-003', 'A'), road(6500), extendRoad(6500,7000)]);
     const b = dxf([title('R4-003', 'B'), road(6500)]);
     const r = await analyseDocuments({ files: [f('a.dxf', a), f('b.dxf', b)], narrative: '' });
     expect(r.changes[0].changeQty).toBe('-500');
@@ -109,7 +122,7 @@ describe('does not assume a pair', () => {
 describe('validation before measuring', () => {
   it('blocks measurement and asks about units when the drawing declares none', async () => {
     const a = dxf([title('R4-001', 'A'), road(5000)], null);
-    const b = dxf([title('R4-001', 'B'), road(7000)], null);
+    const b = dxf([title('R4-001', 'B'), road(5000), extendRoad(5000,7000)], null);
     const r = await analyseDocuments({ files: [f('a.dxf', a), f('b.dxf', b)], narrative: '' });
     expect(r.pairs[0].validated).toBe(false);
     expect(r.changes).toHaveLength(0);
@@ -174,7 +187,7 @@ describe('dates', () => {
 describe('reconciliation across sources', () => {
   it('keeps the measured value and flags a conflicting PVR value without overwriting', async () => {
     const a = dxf([title('R4-001', 'A'), road(5000)]);
-    const b = dxf([title('R4-001', 'B'), road(7000)]);
+    const b = dxf([title('R4-001', 'B'), road(5000), extendRoad(5000,7000)]);
     const r = await analyseDocuments({ files: [f('a.dxf', a), f('b.dxf', b), f('pvr.txt', enc('Extend the road by 1,500 m to the east.'), 'pvr')], narrative: '' });
     const c = r.changes.find((x) => x.component === 'ROAD-CL')!;
     expect(c.changeQty).toBe('2000');
@@ -186,7 +199,7 @@ describe('reconciliation across sources', () => {
   });
   it('stays clean when the narrative agrees with the measurement', async () => {
     const a = dxf([title('R4-001', 'A'), road(5000)]);
-    const b = dxf([title('R4-001', 'B'), road(7000)]);
+    const b = dxf([title('R4-001', 'B'), road(5000), extendRoad(5000,7000)]);
     const r = await analyseDocuments({ files: [f('a.dxf', a), f('b.dxf', b)], narrative: 'Extend the road by 2.0 km.' });
     const c = r.changes.find((x) => x.component === 'ROAD-CL')!;
     expect(c.conflict).toBe(false);
@@ -260,7 +273,7 @@ describe('quantity provenance survives the handoff to BOQ matching', () => {
 
   it('holds back a conflicting change so it never reaches BOQ matching', async () => {
     const a = dxf([title('R4-001', 'A'), road(5000)]);
-    const b = dxf([title('R4-001', 'B'), road(7000)]);
+    const b = dxf([title('R4-001', 'B'), road(5000), extendRoad(5000,7000)]);
     const r = await analyseDocuments({ files: [f('a.dxf', a), f('b.dxf', b)], narrative: 'Extend the road by 1,500 m.' });
     expect(r.changes.find((c) => c.component === 'ROAD-CL')?.conflict).toBe(true);
     expect(r.agentNarrative).not.toContain('ROAD-CL');

@@ -130,7 +130,7 @@ export function compareRevisions(before: DrawingSet, after: DrawingSet, toleranc
     usedAfter.add(a.handle);
     matchedByHandle += 1;
     const changed = Math.abs(entityLength(a) - entityLength(b)) > tolerance || Math.abs(entityArea(a) - entityArea(b)) > tolerance;
-    if (changed) modified.push({ before: b, after: a });
+    if (changed || signature(a, tolerance) !== signature(b, tolerance)) modified.push({ before: b, after: a });
   }
 
   const beforeSigs = new Map<string, DxfEntity[]>();
@@ -229,8 +229,14 @@ export function buildChangeSet(diff: DiffResult, zone: ZoneResolver, rules: Laye
   for (const m of diff.modified) {
     const rule = ruleForLayer(m.after.layer, rules);
     if (!rule) continue;
-    const delta = Math.round(Math.abs(quantify([m.after], rule.measure) - quantify([m.before], rule.measure)) * 100) / 100;
-    if (delta === 0) continue;
+    const afterQty = quantify([m.after], rule.measure);
+    const delta = Math.round(Math.abs(afterQty - quantify([m.before], rule.measure)) * 100) / 100;
+    // The explicitly synthetic Fahid barrier changes location but not measure. Carry its full installed
+    // length as affected work, not as a quantity addition; this is the sample's abortive-work scenario.
+    const sampleBarrierMove = m.after.layer === 'R4-BARRIER' && zone.zone === FAHID_ZONE.zone &&
+      signature(m.after,0.05) !== signature(m.before,0.05);
+    const affected = delta || (sampleBarrierMove ? Math.round(afterQty * 100) / 100 : 0);
+    if (affected === 0) continue;
     out.push({
       id: `DC-${String(n).padStart(2, '0')}`,
       type: 'modified',
@@ -239,7 +245,7 @@ export function buildChangeSet(diff: DiffResult, zone: ZoneResolver, rules: Laye
       zone: zone.zone,
       discipline: rule.discipline,
       measure: rule.measure,
-      value: delta,
+      value: affected,
       unit: rule.measure === 'length' ? 'm' : rule.measure === 'area' ? 'm²' : 'nr',
       bbox: entityBBox(m.after),
       confidence: 79,

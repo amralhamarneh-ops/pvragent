@@ -81,7 +81,7 @@ function unitCompat(expected: string, boqUnit: string): RetrievedCandidate['unit
 }
 
 export function retrieveCandidates(items: BoqItemRecord[], ctx: Map<string, RowContext>, comp: Pick<ScopeComponent, 'name' | 'discipline' | 'workType' | 'material' | 'specification' | 'location' | 'searchTerms' | 'expectedUnit'>, limit = 12): RetrievedCandidate[] {
-  const queryText = [comp.name, comp.workType, comp.material, comp.discipline, ...comp.searchTerms].join(' ');
+  const queryText = [comp.name, comp.workType, comp.material, comp.discipline, ...(comp.searchTerms ?? [])].join(' ');
   const qTokens = Array.from(new Set(tokenize(queryText).map(stem)));
   const qGroups = groupsOf(tokenize(queryText));
   const coreTokens = new Set(tokenize(`${comp.name} ${comp.workType}`).map(stem));

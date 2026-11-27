@@ -147,8 +147,14 @@ export function interpretSheet(sheet: RawSheet, mapping: SheetMapping): Interpre
       rowClass = 'bill_heading'; reason = 'Looks like a bill or section heading.'; bill = description || ref || bill;
     }
     else if (unit === '' && quantity.state === 'missing' && rate.state === 'missing' && (ref !== '' || description !== '')) {
-      rowClass = description.length > 0 && ref === '' ? 'title' : 'note'; reason = 'Has no unit, quantity or rate, so it is a heading or note, not a priced item.';
-      if (rowClass === 'title' && description.length < 80) bill = bill;
+      const prior = rows.at(-1);
+      // A description-only row immediately below an item (or another continuation) is not a new title.
+      const continuation = !ref && !!description && !!prior && prior.rowNumber + 1 === r.rowNumber &&
+        ['item', 'unpriced_item', 'note'].includes(prior.rowClass) &&
+        !/^(?:note[s]?|preamble|general|measurement|specification)[ :]/i.test(description) &&
+        !/^[A-Z0-9 &/-]+$/.test(description);
+      rowClass = description.length > 0 && ref === '' && !continuation ? 'title' : 'note';
+      reason = continuation ? 'Description continues below the previous item; not a priced item.' : 'Has no unit, quantity or rate, so it is a heading or note, not a priced item.';
     }
     else {
       const hasPricingInfo = unit !== '' || quantity.state !== 'missing' || rate.state !== 'missing';

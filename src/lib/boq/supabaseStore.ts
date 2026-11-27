@@ -367,7 +367,13 @@ export class SupabaseRestStore implements CaseStore {
       return this.ack(existing, await this.batchLedger(caseId, p.importId), 'pending');
     }
     // Revision numbers are unique per case. A concurrent import that took this number is reported, not overwritten.
-    await this.req('pvr_boq_imports', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({ id: p.importId, case_id: caseId, owner_id: this.user.id, revision: p.revision, file_name: p.meta.fileName, original_file_name: p.meta.fileName, file_sha256: p.meta.sha256, size_bytes: p.meta.sizeBytes, format: p.meta.format, currency: p.meta.currency, revision_label: p.meta.revisionLabel, mappings: p.meta.mappings, confirmed_at: null, pending_confirmed_at: p.meta.confirmedAt, import_status: 'pending', expected_rows: p.expectedRows, expected_batches: p.expectedBatches, import_checksum: p.importChecksum, storage_path: p.meta.storagePath ?? null, uploaded_at: p.meta.uploadedAt ?? null, file_stored: !!p.meta.fileStored }) });
+    try {
+      await this.req('pvr_boq_imports', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({ id: p.importId, case_id: caseId, owner_id: this.user.id, revision: p.revision, file_name: p.meta.fileName, original_file_name: p.meta.fileName, file_sha256: p.meta.sha256, size_bytes: p.meta.sizeBytes, format: p.meta.format, currency: p.meta.currency, revision_label: p.meta.revisionLabel, mappings: p.meta.mappings, confirmed_at: null, pending_confirmed_at: p.meta.confirmedAt, import_status: 'pending', expected_rows: p.expectedRows, expected_batches: p.expectedBatches, import_checksum: p.importChecksum, storage_path: p.meta.storagePath ?? null, uploaded_at: p.meta.uploadedAt ?? null, file_stored: !!p.meta.fileStored }) });
+    } catch (error) {
+      // Uniqueness conflicts can reveal identifiers used by other accounts. Return only a generic inaccessible result.
+      if (error instanceof Error && /\b23505\b/.test(error.message)) throw new AccessDeniedError(404, 'That import could not be initialised for this case.');
+      throw error;
+    }
     const created = await this.findImport(caseId, p.importId);
     if (!created) throw new Error('The import could not be initialised.');
     return this.ack(created, [], 'pending');
