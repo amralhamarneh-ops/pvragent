@@ -99,6 +99,10 @@ export async function convertDwg(bytes: Uint8Array, env: Record<string, string |
       out = await run(st.path, ['--as', 'r2013', '-o', join(outDir, 'drawing.dxf'), inFile], { timeout: timeoutMs });
     }
     const warnings = warningLines(out.stdout, out.stderr);
+    if (/^\s*(?:fatal(?: error)?|error)\s*:/im.test(`${out.stdout}\n${out.stderr}`)) {
+      return {ok:false,error:'DWG conversion reported errors; its DXF is unsafe to use. Provide an issued ASCII DXF or use a validated converter.',
+        converter:st.converter,converterVersion,sourceSha256,warnings};
+    }
     const produced = (await readdir(outDir)).find((f) => /\.dxf$/i.test(f));
     if (!produced) return { ok: false, error: `The ${st.converter} converter ran but produced no DXF file. The DWG version may not be supported by it.`, converter: st.converter, converterVersion, sourceSha256, warnings };
     const dxf = new Uint8Array(await readFile(join(outDir, produced)));
