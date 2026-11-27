@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { REPLAY_SPEEDS, replayDelay, type ReplaySpeed } from '@/lib/drawings/replay';
+import DrawingChangeSheets from './DrawingChangeSheets';
 import SavedDrawingReplay from '@/app/case-workspace/components/SavedDrawingReplay';
 import { DEMO_KEY, REHEARSAL_LIMIT, loadBrowserRehearsal, runBrowserRehearsal, type BrowserRehearsal } from '@/lib/demo/browserRehearsal';
 
@@ -111,6 +112,8 @@ export default function BrowserDemo() {
     {status ? <p role="status" className="text-sm font-medium">{status}</p> : null}
     {error ? <p role="alert" className="rounded border border-destructive/40 p-3 text-sm text-destructive">{error}{run ? ' The result shown below is from the latest completed run.' : ''}</p> : null}
     {run ? <div className="space-y-5">
+      <DrawingChangeSheets key={run.savedAt} model={run.replay.models[0]} changes={run.changes} />
+      <SavedDrawingReplay key={`replay-${run.savedAt}`} replay={run.replay} changes={run.changes} />
       <section className="rounded-lg border border-border bg-card p-4" aria-label="Measured quantities and BOQ mapping">
         <h2 className="text-xl font-semibold">Measured quantities and BOQ mapping</h2>
         <p className="text-sm text-muted-foreground">{run.boqRows} BOQ item(s) read. Mappings are proposals, not approvals. Quantities come from the drawing comparison only.</p>
@@ -146,7 +149,6 @@ export default function BrowserDemo() {
           })}</tbody>
         </table></div>
       </section>
-      <SavedDrawingReplay key={run.savedAt} replay={run.replay} changes={run.changes} />
       <section className="rounded-lg border border-border bg-card p-4" aria-label="Saved processing steps">
         <h2 className="text-xl font-semibold">Saved processing steps</h2>
         <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm">{run.events.map(event=><li key={event.step}><strong>{event.step}</strong>: {event.detail}</li>)}</ol>
