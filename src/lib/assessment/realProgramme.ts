@@ -5,8 +5,24 @@ function table(model: ScheduleModel, name: string): Record<string, string>[] {
   const t = model.rawTables?.[name];
   return t ? t.rows.map(r => Object.fromEntries(t.fields.map((f, i) => [f, (r[i] ?? '').trim()]))) : [];
 }
-const iso = (v = '') => /^\d{4}-\d{2}-\d{2}/.test(v) ? v.slice(0, 10) : '';
+const iso = (v = '') => {
+  if (!/^\d{4}-\d{2}-\d{2}(?:$|[ T])/.test(v)) return '';
+  const d = v.slice(0, 10);
+  const instant = new Date(`${d}T00:00:00Z`);
+  return Number.isFinite(instant.valueOf()) && instant.toISOString().slice(0, 10) === d ? d : '';
+};
 const idOf = (a: ScheduleModel['activities'][number]) => a.taskId ?? a.id;
+const setting = (m: ScheduleModel, projectId?: string) => table(m, 'SCHEDOPTIONS').filter(r => r.proj_id === projectId);
+const comparableNumber = (v: string) => v && Number.isFinite(Number(v)) ? Number(v) : v ?? '';
+const comparableCalendar = (c: NonNullable<ScheduleModel['calendars']>[number]) =>
+  JSON.stringify([c.hoursPerDay, c.hoursPerWeek, c.hoursPerMonth, c.hoursPerYear, c.rawData]);
+const settingFields = [
+  'sched_outer_depend_type','sched_open_critical_flag','sched_lag_early_start_flag','sched_retained_logic',
+  'sched_float_type','sched_calendar_on_relationship_lag','sched_use_expect_end_flag','sched_progress_override',
+  'sched_use_project_end_date_for_float','enable_multiple_longest_path_calc','limit_multiple_longest_path_calc',
+  'max_multiple_longest_path','use_total_float_multiple_longest_paths',
+];
+const projectFields = ['critical_path_type','critical_drtn_hr_cnt','plan_start_date','plan_end_date'];
 
 export function describeProgramme(model: ScheduleModel) {
   const projects = table(model, 'PROJECT');
@@ -19,7 +35,8 @@ export function describeProgramme(model: ScheduleModel) {
   }));
   return { projectCount: projects.length, projectCode: p?.proj_short_name || '', dataDate: p?.last_recalc_date || p?.sum_data_date || model.dataDate,
     forecast: p?.scd_end_date || '', activityCount: model.activities.length, relationships: model.relationships.length,
-    actualActivityCount: model.activities.filter(a => a.actualStart || a.actualFinish).length, milestone };
+    actualActivityCount: model.activities.filter(a => a.actualStart || a.actualFinish).length,
+    unresolvedRelationships: model.relationships.filter(r => !r.resolved).length, milestone };
 }
 
 /** The impacted XER is reference evidence; never an input into the prediction. Align by activity code, not by re-export IDs. */
@@ -27,25 +44,52 @@ export function compareProgrammeEvidence(source: ScheduleModel, reference: Sched
   const lhs = describeProgramme(source), rhs = describeProgramme(reference);
   const a = new Map(table(source, 'TASK').map(t => [t.task_code || t.task_id, t]));
   const b = new Map(table(reference, 'TASK').map(t => [t.task_code || t.task_id, t]));
-  const duplicateCodes = a.size !== source.activities.length || b.size !== reference.activities.length;
+  const duplicateCodes = a.size !== source.activities.length || b.size !== reference.activities.length ||
+    [...a.values(), ...b.values()].some(t => !t.task_code || !t.task_id);
+  const sourceProject = table(source, 'PROJECT')[0], referenceProject = table(reference, 'PROJECT')[0];
+  const scheduleSettingsA = setting(source, sourceProject?.proj_id), scheduleSettingsB = setting(reference, referenceProject?.proj_id);
+  const changedSettingFields = [
+    ...settingFields.filter(k => (scheduleSettingsA[0]?.[k] ?? '') !== (scheduleSettingsB[0]?.[k] ?? '')),
+    ...projectFields.filter(k => (sourceProject?.[k] ?? '') !== (referenceProject?.[k] ?? '')),
+  ];
+  const calendarsA = new Map((source.calendars ?? []).map(c => [c.id, comparableCalendar(c)]));
+  const calendarsB = new Map((reference.calendars ?? []).map(c => [c.id, comparableCalendar(c)]));
+  const sourceProjectCalendar = calendarsA.get(sourceProject?.clndr_id);
+  const referenceProjectCalendar = calendarsB.get(referenceProject?.clndr_id);
+  const projectCalendarChanged = Boolean(sourceProjectCalendar && referenceProjectCalendar && sourceProjectCalendar !== referenceProjectCalendar);
   const checks = [
     ...(lhs.projectCount !== 1 || rhs.projectCount !== 1 ? ['Both XERs must contain a single project.'] : []),
     ...(duplicateCodes ? ['Activity codes are not unique or source task identities are incomplete.'] : []),
-    ...(!lhs.dataDate || !rhs.dataDate || lhs.dataDate !== rhs.dataDate ? ['The XERs have different or missing data dates.'] : []),
-    ...(!lhs.forecast || !rhs.forecast ? ['A stored forecast completion date is missing.'] : []),
+    ...(!iso(lhs.dataDate) || !iso(rhs.dataDate) || lhs.dataDate !== rhs.dataDate ? ['The XERs have different or missing data dates.'] : []),
+    ...(!iso(lhs.forecast) || !iso(rhs.forecast) ? ['A stored forecast completion date is missing or invalid.'] : []),
+    ...(source.integrityProblems?.length || reference.integrityProblems?.length ? ['One or both imports have structural diagnostics.'] : []),
+    ...(lhs.unresolvedRelationships || rhs.unresolvedRelationships ? ['One or both XERs contain unresolved relationships; logic comparison is incomplete.'] : []),
+    ...(scheduleSettingsA.length !== 1 || scheduleSettingsB.length !== 1 ? ['A unique project scheduling-options row is not available in both exports.'] : []),
+    ...(changedSettingFields.length ? ['Stored project or scheduling settings differ between exports.'] : []),
+    ...(projectCalendarChanged ? ['The stored project default calendar definition differs between exports.'] : []),
+    ...(!sourceProjectCalendar || !referenceProjectCalendar ? ['A project default calendar definition is missing.'] : []),
   ];
   let progressChanges = 0;
+  let existingCalendarChanges = 0, unknownCalendarComparisons = 0;
+  let existingActivityTypeChanges = 0;
   const existingDurationChanges: {code: string; before: string; after: string}[] = [];
   let existingConstraintChanges = 0;
   for (const [code, l] of a) {
     const r = b.get(code);
     if (!r) continue;
-    if (['target_drtn_hr_cnt','remain_drtn_hr_cnt'].some(k => (l[k] ?? '') !== (r[k] ?? ''))) {
+    const lc = calendarsA.get(l.clndr_id), rc = calendarsB.get(r.clndr_id);
+    if (!lc || !rc) unknownCalendarComparisons++;
+    else if (lc !== rc) existingCalendarChanges++;
+    if ((l.task_type ?? '') !== (r.task_type ?? '')) existingActivityTypeChanges++;
+    if (['target_drtn_hr_cnt','remain_drtn_hr_cnt'].some(k => comparableNumber(l[k]) !== comparableNumber(r[k]))) {
       existingDurationChanges.push({code, before: l.remain_drtn_hr_cnt || 'unknown', after: r.remain_drtn_hr_cnt || 'unknown'});
     }
     if (['cstr_date','cstr_type','cstr_date2','cstr_type2','expect_end_date'].some(k => (l[k] ?? '') !== (r[k] ?? ''))) existingConstraintChanges++;
     if (['status_code', 'act_start_date', 'act_end_date', 'phys_complete_pct'].some(k => (l[k] ?? '') !== (r[k] ?? ''))) progressChanges++;
   }
+  if (existingCalendarChanges) checks.push(`${existingCalendarChanges.toLocaleString()} common activities have different working calendars.`);
+  if (unknownCalendarComparisons) checks.push(`${unknownCalendarComparisons.toLocaleString()} common activities lack a calendar definition on one or both sides.`);
+  if (existingActivityTypeChanges) checks.push(`${existingActivityTypeChanges.toLocaleString()} common activities have different activity types.`);
   if (progressChanges) checks.push(`${progressChanges.toLocaleString()} common activities have different actual dates, status or physical progress.`);
   const added = [...b].filter(([code]) => !a.has(code)).map(([code, t]) => ({code, description: t.task_name, forecastFinish: t.early_end_date}));
   const removed = [...a.keys()].filter(code => !b.has(code)).length;
@@ -64,7 +108,7 @@ export function compareProgrammeEvidence(source: ScheduleModel, reference: Sched
   const milestones = lhs.milestone.flatMap(x => { const y = rhs.milestone.find(z => z.code === x.code);
     return y && (x.forecast !== y.forecast || x.floatHours !== y.floatHours) ? [{code: x.code, name: x.name, before: x.forecast, after: y.forecast, floatBefore: x.floatHours, floatAfter: y.floatHours}] : [];
   });
-  return { lhs, rhs, checks, progressChanges, added, removed, milestones, referenceTies, referenceInternalTies, existingDurationChanges, existingConstraintChanges, existingLinkAdds, existingLinkRemovals,
+  return { lhs, rhs, checks, progressChanges, added, removed, milestones, referenceTies, referenceInternalTies, existingDurationChanges, existingConstraintChanges, existingLinkAdds, existingLinkRemovals, changedSettingFields, projectCalendarChanged, existingCalendarChanges, unknownCalendarComparisons, existingActivityTypeChanges,
     observedCalendarDays: iso(lhs.forecast) && iso(rhs.forecast) ? dayDiff(iso(lhs.forecast), iso(rhs.forecast)) : null };
 }
 
@@ -97,6 +141,7 @@ export function validateRealProgramme(model: ScheduleModel): { network: CpmNetwo
   const schedule = table(model, 'SCHEDOPTIONS').find(s => s.proj_id === p[0]?.proj_id);
   const reasons: string[] = [];
   const unavailable = {network:null,result:null,reasons,compared:0,mismatches:0};
+  if (model.integrityProblems?.length) reasons.push(...model.integrityProblems);
   if (p.length !== 1 || !iso(model.dataDate) || !model.activities.length || taskRows.length !== model.activities.length) reasons.push('A single project, valid data date and source activity rows are required.');
   if (model.relationships.some(r => !r.resolved) || table(model,'TASKPRED').some(r => !['PR_FS','PR_SS','PR_FF','PR_SF'].includes(r.pred_type))) reasons.push('There are unresolved or unsupported relationships.');
   if (!schedule || schedule.sched_retained_logic !== 'Y' || schedule.sched_progress_override !== 'N' || schedule.sched_float_type !== 'FT_FF') reasons.push('P6 retained logic and finish float settings must be present and compatible.');
@@ -108,7 +153,7 @@ export function validateRealProgramme(model: ScheduleModel): { network: CpmNetwo
   const calendars = (model.calendars ?? []).filter(c => used.has(c.id)).flatMap(c => {const d = dayCalendar(c); return d ? [d] : [];});
   if (calendars.length !== used.size) reasons.push('One or more P6 calendars could not be represented without losing working time.');
   const hpd = new Map(model.activities.map(a => [idOf(a), a.hoursPerDay]));
-  if (model.activities.some(a => !(a.hoursPerDay && a.hoursPerDay > 0) || (a.remainingDurationHours == null && a.kind === 'task') || (a.remainingDurationHours != null && !Number.isInteger(a.remainingDurationHours / (a.hoursPerDay ?? 1)))) || model.relationships.some(r => r.lagHours == null || Math.abs(r.lag - Math.round(r.lag)) > 1e-9)) reasons.push('Fractional or missing duration/lag values require an hourly or P6 engine.');
+  if (model.activities.some(a => !(a.hoursPerDay && a.hoursPerDay > 0) || (a.remainingDurationHours == null && a.kind === 'task') || (a.remainingDurationHours != null && !Number.isInteger(a.remainingDurationHours / (a.hoursPerDay ?? 1)))) || model.relationships.some(r => r.lagHours == null || !(hpd.get(r.toTaskId ?? '')! > 0) || !Number.isInteger(r.lagHours / hpd.get(r.toTaskId ?? '')!))) reasons.push('Fractional or missing duration/lag values require an hourly or P6 engine.');
   if (model.activities.some(a => (a.constraints?.length ?? 0) > 1 || a.constraints?.some(c => !CONS[c.type] || !iso(c.date)))) reasons.push('The source contains multiple or unsupported activity constraints.');
   if (reasons.length) return unavailable;
   const network: CpmNetwork = {

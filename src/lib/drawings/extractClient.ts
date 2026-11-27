@@ -1,4 +1,5 @@
 import type { ExtractedDocument } from './types';
+import { getAccessToken } from '@/lib/supabase/client';
 
 export interface ExtractionCapabilities {
   pdfText: boolean; docx: boolean; ocrImages: boolean; ocrScannedPdf: boolean;
@@ -26,7 +27,10 @@ export const serverExtractor: Extractor = async (name, bytes, onProgress, signal
   form.append('file', new Blob([copy]), name);
   form.append('name', name);
   let res: Response;
-  try { res = await fetch('/api/extract', { method: 'POST', body: form, signal }); }
+  try {
+    const token = await getAccessToken();
+    res = await fetch('/api/extract', { method: 'POST', body: form, signal, ...(token ? {headers:{authorization:`Bearer ${token}`}} : {}) });
+  }
   catch (e) { return { kind: 'text', ok: false, error: e instanceof Error && e.name === 'AbortError' ? 'Cancelled.' : `The extraction service could not be reached: ${e instanceof Error ? e.message : 'network error'}` }; }
   if (!res.ok || !res.body) { let msg = `The extraction service returned ${res.status}.`; try { const j = await res.json(); if (j?.error) msg = j.error; } catch { /* keep */ } return { kind: 'text', ok: false, error: msg }; }
   const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = '';

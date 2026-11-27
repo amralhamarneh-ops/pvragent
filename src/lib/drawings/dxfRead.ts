@@ -116,6 +116,8 @@ function toEntities(e: Raw, m: Xf, fromBlock: string | undefined, skipped: Recor
     return null;
   }
   const extra: Partial<DrawingEntity> = fromBlock ? { fromBlock } : {};
+  if (kind === 'POLYLINE' && (e.includesCurveFitVertices || e.includesSplineFitVertices || e.is3dPolyline
+    || e.is3dPolygonMesh || e.isPolyfaceMesh)) return null; // vertex lists are not exact planar paths
   if (kind === 'LINE' || kind === 'LWPOLYLINE' || kind === 'POLYLINE') {
     const raw = Array.isArray(e.vertices) ? (e.vertices as Raw[]) : [];
     const pts = raw.filter(isPt) as unknown as (Pt & { bulge?: number })[];
@@ -158,22 +160,65 @@ function toEntities(e: Raw, m: Xf, fromBlock: string | undefined, skipped: Recor
   return null;
 }
 
-type Blocks = Record<string, { entities?: Raw[]; position?: Pt }>;
+type Blocks = Record<string, { entities?: Raw[]; position?: Pt; xrefPath?: string; type?: number }>;
+type Group = { code: number; value: unknown };
+type Parser = { parseSync: (s: string) => Raw; registerEntityHandler: (ctor: new () => unknown) => void };
+const fallbackGeometryTypes = ['HATCH', 'MESH', 'REGION', '3DSOLID', 'BODY', 'ACAD_PROXY_ENTITY', 'AEC_PROXY_ENTITY', 'IMAGE', 'WIPEOUT', 'MLINE', 'HELIX', 'XLINE', 'RAY', 'SURFACE', 'EXTRUDEDSURFACE', 'LOFTEDSURFACE', 'REVOLVEDSURFACE', 'SWEPTSURFACE', 'UNDERLAY', 'PDFUNDERLAY', 'DWFUNDERLAY', 'DGNUNDERLAY'];
+const geometricKinds = new Set(['LINE', 'POLYLINE', 'LWPOLYLINE', 'ARC', 'CIRCLE', 'SPLINE', 'ELLIPSE', 'SOLID', '3DFACE', ...fallbackGeometryTypes]);
+const external = (d: Blocks[string]) => !!(d.xrefPath || ((d.type ?? 0) & (4 | 8)));
+/** dxf-parser otherwise silently discards these entity types; retain only non-quantitative coverage metadata. */
+function trackUnsupportedEntities(parser: Parser) {
+  for (const kind of fallbackGeometryTypes) parser.registerEntityHandler(class {
+    ForEntityName = kind;
+    parseEntity(scanner: { next(): Group; isEOF(): boolean }) {
+      const e: Raw = { type: kind };
+      let group = scanner.next();
+      while (!scanner.isEOF() && group.code !== 0) {
+        if (group.code === 8) e.layer = group.value;
+        if (group.code === 5) e.handle = group.value;
+        if (group.code === 67) e.inPaperSpace = group.value === 1;
+        group = scanner.next();
+      }
+      return e;
+    }
+  });
+}
+type Coverage = { layers: Map<string, Set<string>>; unbounded: Map<string, { layer: string; reason: string }> };
+function recordLayerGap(coverage: Coverage, e: Raw, layer: string) {
+  const kind = String(e.type ?? '');
+  if (!geometricKinds.has(kind)) return;
+  const set = coverage.layers.get(layer) ?? new Set();
+  set.add(kind);
+  coverage.layers.set(layer, set);
+}
+function recordUnboundedGap(coverage: Coverage, layer: string, reason: string) {
+  coverage.unbounded.set(JSON.stringify([layer, reason]), { layer, reason });
+}
 
 /**
  * Expand an INSERT into real geometry using the block definition, insertion point, rotation, X/Y scale and array
  * repeat. Nested inserts are followed to a fixed depth; anything beyond is reported rather than silently dropped.
  */
-function expandInsert(e: Raw, m: Xf, blocks: Blocks, depth: number, out: DrawingEntity[], skipped: Record<string, number>, counter: { n: number }): boolean {
+function expandInsert(e: Raw, m: Xf, blocks: Blocks, depth: number, out: DrawingEntity[], skipped: Record<string, number>, counter: { n: number }, coverage: Coverage, inheritedLayer?: string): boolean {
   const name = String(e.name ?? '');
+  const rawLayer = String(e.layer ?? '0');
+  const layer = rawLayer === '0' ? (inheritedLayer ?? '0') : rawLayer;
   if (nonPlanar(e)) {
+    recordUnboundedGap(coverage, layer, `Non-planar INSERT “${name}”`);
     skipped['INSERT (non-planar object coordinate system)'] = (skipped['INSERT (non-planar object coordinate system)'] ?? 0) + 1;
     return true;
   }
   const def = blocks[name];
   const pos = isPt(e.position) ? e.position : null;
-  if (!def || !Array.isArray(def.entities) || !pos) return false;
-  if (depth >= MAX_BLOCK_DEPTH) { skipped['INSERT (nesting deeper than 8)'] = (skipped['INSERT (nesting deeper than 8)'] ?? 0) + 1; return true; }
+  if (def && external(def) && !(def.entities?.length)) {
+    recordUnboundedGap(coverage, layer, `Unresolved external reference “${name}”`);
+    return false;
+  }
+  if (!def || !pos) {
+    recordUnboundedGap(coverage, layer, `Unread INSERT “${name}”`);
+    return false;
+  }
+  if (depth >= MAX_BLOCK_DEPTH) { recordUnboundedGap(coverage, layer, `Nested INSERT limit for “${name}”`); skipped['INSERT (nesting deeper than 8)'] = (skipped['INSERT (nesting deeper than 8)'] ?? 0) + 1; return true; }
   const sx = num(e.xScale) ?? 1; const sy = num(e.yScale) ?? sx; const rot = ((num(e.rotation) ?? 0) * Math.PI) / 180;
   const cols = Math.max(1, Math.floor(num(e.columnCount) ?? 1)); const rows = Math.max(1, Math.floor(num(e.rowCount) ?? 1));
   const cs = num(e.columnSpacing) ?? 0; const rs = num(e.rowSpacing) ?? 0;
@@ -184,11 +229,16 @@ function expandInsert(e: Raw, m: Xf, blocks: Blocks, depth: number, out: Drawing
     const shift: Xf = { a: 1, b: 0, c: 0, d: 1, tx: -base.x, ty: -base.y };
     const full = mul(m, mul(local, shift));
     counter.n += 1;
-    for (const be of def.entities) {
-      if (be.type === 'INSERT') { if (!expandInsert(be, full, blocks, depth + 1, out, skipped, counter)) skipped[`INSERT of undefined block "${String(be.name ?? '')}"`] = (skipped[`INSERT of undefined block "${String(be.name ?? '')}"`] ?? 0) + 1; continue; }
+    for (const be of def.entities ?? []) {
+      if (be.inPaperSpace === true) continue;
+      if (be.type === 'INSERT') { if (!expandInsert(be, full, blocks, depth + 1, out, skipped, counter, coverage, layer)) skipped[`INSERT of undefined block "${String(be.name ?? '')}"`] = (skipped[`INSERT of undefined block "${String(be.name ?? '')}"`] ?? 0) + 1; continue; }
       if (be.type === 'TEXT' || be.type === 'MTEXT' || be.type === 'ATTRIB' || be.type === 'ATTDEF') continue;
-      const ents = toEntities(be, full, name, skipped, String(be.layer ?? '0') === '0' ? String(e.layer ?? '0') : undefined);
-      if (ents) { for (let k = 0; k < ents.length; k += 1) out.push(ents[k]); } else skipped[String(be.type ?? 'unknown')] = (skipped[String(be.type ?? 'unknown')] ?? 0) + 1;
+      const assignedLayer = String(be.layer ?? '0') === '0' ? layer : String(be.layer);
+      const ents = toEntities(be, full, name, skipped, assignedLayer);
+      if (ents) { for (let k = 0; k < ents.length; k += 1) out.push(ents[k]); } else {
+        skipped[String(be.type ?? 'unknown')] = (skipped[String(be.type ?? 'unknown')] ?? 0) + 1;
+        recordLayerGap(coverage, be, assignedLayer);
+      }
     }
   }
   return true;
@@ -245,10 +295,12 @@ export async function readDxf(fileName: string, bytes: Uint8Array, onProgress?: 
   let parsed: Raw;
   onProgress?.('parsing', { detail: `Parsing ${(bytes.byteLength / 1024).toFixed(0)} KB of DXF text` });
   try {
-    const mod = (await import('dxf-parser')) as unknown as { default?: new () => { parseSync: (s: string) => Raw }; DxfParser?: new () => { parseSync: (s: string) => Raw } };
+    const mod = (await import('dxf-parser')) as unknown as { default?: new () => Parser; DxfParser?: new () => Parser };
     const Ctor = mod.default ?? mod.DxfParser;
     if (!Ctor) return { ...base, state: 'failed', limitation: 'The DXF parser could not be loaded.' };
-    parsed = new Ctor().parseSync(text);
+    const parser = new Ctor();
+    trackUnsupportedEntities(parser);
+    parsed = parser.parseSync(text);
   } catch (err) {
     return { ...base, state: 'failed', limitation: `The DXF could not be parsed: ${err instanceof Error ? err.message : 'unknown error'}.` };
   }
@@ -262,6 +314,7 @@ export async function readDxf(fileName: string, bytes: Uint8Array, onProgress?: 
   const paperTitleTexts: string[] = [];
   const skipped: Record<string, number> = {};
   const counter = { n: 0 };
+  const coverage: Coverage = { layers: new Map(), unbounded: new Map() };
   let excludedPaper = 0;
   for (const e of rawEntities) {
     if (e.inPaperSpace === true) {
@@ -272,17 +325,18 @@ export async function readDxf(fileName: string, bytes: Uint8Array, onProgress?: 
     }
     if (e.type === 'TEXT' || e.type === 'MTEXT' || e.type === 'ATTRIB' || e.type === 'ATTDEF') { const t = textOf(e); if (t.trim()) texts.push(t); continue; }
     if (e.type === 'INSERT') {
-      const before = entities.length;
-      const ok = expandInsert(e, IDENTITY, blocks, 0, entities, skipped, counter);
+      const ok = expandInsert(e, IDENTITY, blocks, 0, entities, skipped, counter, coverage);
       const p = e.position;
       // Always keep one countable INSERT marker so block counts (nr) remain exact even when the block has geometry.
       if (isPt(p) && !nonPlanar(e)) entities.push({ kind: 'INSERT', layer: String(e.layer ?? '0'), handle: String(e.handle ?? ''), vertices: [{ x: p.x, y: p.y }], closed: false, length: 0, area: 0, blockName: String(e.name ?? '') });
       if (!ok) skipped[`INSERT of undefined block "${String(e.name ?? '')}" (counted, no geometry)`] = (skipped[`INSERT of undefined block "${String(e.name ?? '')}" (counted, no geometry)`] ?? 0) + 1;
-      void before;
       continue;
     }
     const ents = toEntities(e, IDENTITY, undefined, skipped);
-    if (ents) { for (let k = 0; k < ents.length; k += 1) entities.push(ents[k]); } else skipped[String(e.type ?? 'unknown')] = (skipped[String(e.type ?? 'unknown')] ?? 0) + 1;
+    if (ents) { for (let k = 0; k < ents.length; k += 1) entities.push(ents[k]); } else {
+      skipped[String(e.type ?? 'unknown')] = (skipped[String(e.type ?? 'unknown')] ?? 0) + 1;
+      recordLayerGap(coverage, e, String(e.layer ?? '0'));
+    }
   }
   // Block-expanded geometry is drawing geometry, but only the explicit marker counts as one block instance.
   const layerCounts: Record<string, number> = {};
@@ -325,20 +379,18 @@ export async function readDxf(fileName: string, bytes: Uint8Array, onProgress?: 
 
   // External references: an XREF block holds geometry that lives in another file. It cannot be measured from this
   // file, so it is a coverage gap and must be visible, not silent.
-  const xrefBlocks = Object.entries(blocks).filter(([, b]) => {
-    const blk = b as { xrefPath?: string; xref?: string; type?: number };
-    return !!(blk.xrefPath || blk.xref || ((blk.type ?? 0) & 4));
-  }).map(([n]) => n);
+  const xrefBlocks = Object.entries(blocks).filter(([, b]) => external(b)).map(([n]) => n);
   const unresolvedXrefs = xrefBlocks.filter((n) => !(Array.isArray(blocks[n]?.entities) && (blocks[n]?.entities?.length ?? 0) > 0));
   if (unresolvedXrefs.length) {
     for (const n of unresolvedXrefs) skipped[`XREF "${n}" (external file not supplied)`] = 1;
     issues.push(`${unresolvedXrefs.length} external reference(s) are not resolved: ${unresolvedXrefs.slice(0, 10).join(', ')}. Geometry held in those files is NOT included; upload them or bind the references before exporting.`);
   }
   // Unsupported-but-geometric entity types are a coverage limit, not just a note.
-  const GEOMETRIC_UNSUPPORTED = ['SPLINE', 'ELLIPSE', 'HATCH', 'SOLID', '3DFACE', 'MESH', 'DIMENSION', 'LEADER', 'REGION', '3DSOLID', 'BODY', 'IMAGE', 'WIPEOUT'];
-  const unsupportedGeometry = Object.entries(skipped).filter(([k]) => GEOMETRIC_UNSUPPORTED.some((g) => k.startsWith(g)));
-  const unsupportedTransform = Object.keys(skipped).some((k) => /non-uniform block scale|non-planar object coordinate system/.test(k));
-  const coverageLimited = unresolvedXrefs.length > 0 || unsupportedGeometry.length > 0 || unsupportedTransform;
+  const unsupportedGeometry = Object.entries(skipped).filter(([k]) => geometricKinds.has(k));
+  const coverageGapsByLayer = Object.fromEntries([...coverage.layers.entries()].map(([layer, kinds]) => [layer, [...kinds].sort()]));
+  const unboundedCoverageGaps = [...coverage.unbounded.values()];
+  const coverageLimited = unresolvedXrefs.length > 0 || coverage.layers.size > 0 || unboundedCoverageGaps.length > 0;
+  if (unboundedCoverageGaps.length) issues.push(`Coverage is limited: ${unboundedCoverageGaps.length} unresolved model-space insert(s) or reference(s) could hide geometry from quantities.`);
   if (excludedPaper) issues.push(`${excludedPaper} paper-space entity(ies) excluded from model-space geometry and quantity checks.`);
   if (unsupportedGeometry.length) issues.push(`Coverage is limited: ${unsupportedGeometry.map(([k, v]) => `${v} × ${k}`).join(', ')} could not be measured, so quantities from layers containing them may be understated.`);
   if (entities.some((e) => e.curved)) issues.push(`${entities.filter((e) => e.curved).length} curved entity(ies) (arcs, circles, polyline bulges) are measured with their true arc geometry, not as straight chords.`);
@@ -352,7 +404,7 @@ export async function readDxf(fileName: string, bytes: Uint8Array, onProgress?: 
   const state = entities.length > 0 ? 'read' : 'failed';
   const hasInvalid = issues.some((i) => /units/i.test(i));
   void hasInvalid;
-  return { ...base, state, limitation: state === 'failed' ? issues[issues.length - 1] ?? 'No geometry.' : '', titleBlock, texts, unit, unitSource, entities, layers, extents, validationIssues: issues, metresPerUnit: metres, layerCounts, skippedTypes: skipped, expandedBlocks: counter.n, coverageLimited, unresolvedXrefs };
+  return { ...base, state, limitation: state === 'failed' ? issues[issues.length - 1] ?? 'No geometry.' : '', titleBlock, texts, unit, unitSource, entities, layers, extents, validationIssues: issues, metresPerUnit: metres, layerCounts, skippedTypes: skipped, expandedBlocks: counter.n, coverageLimited, unresolvedXrefs, coverageGapsByLayer, unboundedCoverageGaps };
 }
 
 /** Bounds by iteration. `Math.min(...array)` throws RangeError on very large arrays (stack/argument limit). */

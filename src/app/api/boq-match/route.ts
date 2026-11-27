@@ -88,7 +88,9 @@ export async function POST(req: NextRequest) {
 
   try {
     if (body.phase === 'scope') {
-      const evidence = (body.evidence ?? []).slice(0, applied.maxItems);
+      const evidence = (body.evidence ?? []).slice(0, applied.maxItems).map((e) => ({
+        ...e, text: e.extracted ? e.text : '',
+      }));
       const narrative = (body.narrative ?? '').slice(0, 6000);
       if (!narrative.trim() && !evidence.some((e) => e.extracted && e.text.trim())) {
         await record('blocked', model, 'No readable change evidence.');
@@ -98,7 +100,7 @@ export async function POST(req: NextRequest) {
       const key = `scope:${hash({ evidence, narrative, model, v: cfg.version, g: cfg.rules?.additionalInstructions ?? '', l: [applied.maxItems, applied.maxChars] })}`;
       const hit = cached<{ scope: ChangeScope }>(key);
       if (hit) { log('scope', `Reused cached scope for identical evidence and configuration version ${cfg.version}. No model call.`); await record('completed', model, null, { cached: true }); return NextResponse.json({ ...hit, cached: true, events, config: configInfo }); }
-      const docs = evidence.map((e) => `[${e.kind}] ${e.name}: ${e.extracted ? e.text.slice(0, applied.maxChars) : `NO TEXT EXTRACTED (${e.note || 'unsupported file type'}).`}`).join('\n---\n');
+      const docs = evidence.map((e) => `[${e.kind}] ${e.name}: ${e.extracted ? e.text : `NO TEXT EXTRACTED (${e.note || 'unsupported file type'}).`}`).join('\n---\n');
       log('scope', `Sent ${evidence.length} evidence item(s) and a ${narrative.length}-character narrative to ${model} using configuration ${cfg.source === 'published' ? `version ${cfg.version}` : 'built-in rules'}.`);
       const user_ = `<untrusted_document>\nNARRATIVE:\n${narrative}\n\nDOCUMENTS:\n${docs}\n</untrusted_document>\nSCHEMA:\n${SCOPE_SCHEMA_HINT}`;
       const raw = await callModel(applied.system, user_, apiKey, model);
@@ -129,8 +131,8 @@ export async function POST(req: NextRequest) {
       log('match', `Sent ${withCands.length} component(s) with ${withCands.reduce((n, c) => n + Math.min((candidates[c.id] ?? []).length, applied.maxItems), 0)} retrieved candidate line(s) to ${model}. The full BOQ was not sent.`);
       const user_ = `<untrusted_document>\nCHANGE SUMMARY: ${scope.summary}\n</untrusted_document>\n${blocks}\n${potentials ? `\nALREADY MARKED POTENTIAL:\n${potentials}` : ''}`;
       const raw = await callModel(applied.system, user_, apiKey, model);
-      const allowed: Record<string, string[]> = {};
-      for (const c of scope.components) allowed[c.id] = (candidates[c.id] ?? []).slice(0, applied.maxItems).map((k) => k.rowId);
+      const allowed: Record<string, string[]> = Object.create(null);
+      for (const c of scope.components) allowed[c.id] = c.potential ? [] : (candidates[c.id] ?? []).slice(0, applied.maxItems).map((k) => k.rowId);
       const parsed = sanitiseMatch(parseJson(raw), allowed);
       if (!parsed.match) { await record('failed', model, 'The model reply was not a valid matching result.'); return NextResponse.json({ error: 'The model reply was not a valid matching result.', details: parsed.problems.join('; '), events, config: configInfo }, { status: 502 }); }
       log('match', `Model proposed ${parsed.match.lines.length} line(s). ${parsed.problems.length} reference(s) discarded by validation.`);

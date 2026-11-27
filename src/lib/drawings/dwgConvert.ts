@@ -15,10 +15,11 @@
  * supported alternative is to upload an ASCII DXF export.
  */
 import { createHash } from 'node:crypto';
+import { constants } from 'node:fs';
 import { runFile } from '@/lib/server/execFile';
-import { mkdtemp, writeFile, readFile, readdir, rm, mkdir } from 'node:fs/promises';
+import { access, mkdtemp, writeFile, readFile, readdir, rm, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 
 export type DwgStatus =
   | { configured: true; converter: 'oda' | 'libredwg'; path: string }
@@ -74,6 +75,11 @@ export async function convertDwg(bytes: Uint8Array, env: Record<string, string |
   const st = dwgStatus(env);
   if (!st.configured) return { ok: false, error: `${st.reason} ${st.requirement}` };
   const sourceSha256 = sha256(bytes);
+  if (isAbsolute(st.path)) {
+    try { await access(st.path, constants.X_OK); } catch {
+      return { ok: false, error: `DWG conversion failed: the converter executable was not found or is not executable at ${st.path}.`, converter: st.converter, sourceSha256 };
+    }
+  }
   const dir = await mkdtemp(join(tmpdir(), 'pvr-dwg-'));
   try {
     const inDir = join(dir, 'in'); const outDir = join(dir, 'out');

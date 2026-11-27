@@ -20,6 +20,10 @@ export function isDetailOnlyDrawing(file: DrawingFile): boolean {
   return !!file.detailOnlyEvidence || isDetailOnlyTitle(file.titleBlock?.title ?? '');
 }
 
+function unboundedLimits(drawing: DrawingFile): string[] {
+  return (drawing.unboundedCoverageGaps ?? []).filter(({ layer }) => !isPresentationLayer(layer)).map(({ layer, reason }) => `${reason} on layer ${layer}`);
+}
+
 function titleSimilarity(a: string, b: string): number {
   const x = new Set(norm(a).split(' ').filter((w) => w.length > 2));
   const y = new Set(norm(b).split(' ').filter((w) => w.length > 2));
@@ -103,6 +107,8 @@ export function validatePair(p: DrawingPair): DrawingPair {
   const { original: o, revised: r } = p;
   for (const f of [o, r]) {
     if (isDetailOnlyDrawing(f)) blockers.push(`${f.fileName}: typical detail/elevation layout shows configuration, not installed extent. Supply an alignment/layout or chainage schedule.`);
+    const gaps = unboundedLimits(f);
+    if (gaps.length) blockers.push(`${f.fileName}: coverage incomplete; ${gaps.slice(0, 5).join('; ')}${gaps.length > 5 ? ` and ${gaps.length - 5} more` : ''}. Bind or supply the referenced model geometry and re-export.`);
     if (f.metresPerUnit === null) blockers.push(`${f.fileName}: ${f.validationIssues.find((i) => /units/i.test(i)) ?? 'units are not established'}`);
   }
   if (o.metresPerUnit !== null && r.metresPerUnit !== null && o.metresPerUnit !== r.metresPerUnit) blockers.push(`The two drawings use different units (${o.unit} and ${r.unit}), so they are not directly comparable until the units are confirmed.`);
@@ -392,6 +398,9 @@ export function measurePair(pair: DrawingPair, tolerance = 0.01, relocationEvide
     changes: [],
     notes: [`Typical detail/elevation sheet(s) ${detailFiles.join(', ')} show configuration, not the installed extent. A corresponding plan/chainage drawing or a referenced quantity schedule is needed for a takeoff.`],
   };
+  if ([pair.original, pair.revised].some((file) => unboundedLimits(file).length)) {
+    return { changes: [], notes: ['Placed unresolved references or unread block trees can contain geometry on other layers. No exact takeoff was issued.'] };
+  }
   if (!pair.original.metresPerUnit || !pair.revised.metresPerUnit) {
     return {changes: [], notes: ['Both drawing units must be established before measuring.']};
   }
@@ -405,6 +414,13 @@ export function measurePair(pair: DrawingPair, tolerance = 0.01, relocationEvide
   for (const d of diffs) {
     if (isPresentationLayer(d.layer)) {
       notes.push(`Layer ${d.layer}: annotation/frame/legend geometry was excluded from quantities.`);
+      continue;
+    }
+    const limited = [pair.original, pair.revised].flatMap((f) =>
+      Object.entries(f.coverageGapsByLayer ?? {}).filter(([layer]) => layer.toLowerCase() === d.layer.toLowerCase())
+        .map(([, kinds]) => `${f.fileName} (${kinds.join(', ')})`));
+    if (limited.length) {
+      if (d.added.length || d.removed.length || d.relocated.length) notes.push(`Coverage incomplete on layer ${d.layer}: unread geometry in ${limited.join('; ')}. The layer was withheld from the takeoff.`);
       continue;
     }
     const ta = a.get(d.layer); const tb = b.get(d.layer);

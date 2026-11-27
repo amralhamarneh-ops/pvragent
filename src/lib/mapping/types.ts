@@ -112,7 +112,8 @@ export interface ScheduleRelationship {
   /** Internal task ids (TASKPRED task_id / pred_task_id) preserved from the source. */
   fromTaskId?: string;
   toTaskId?: string;
-  /** False when either end of the relationship could not be resolved to an imported activity. */
+  rawType?: string;
+  /** False when endpoints or relationship type/lag cannot be used as schedule logic. */
   resolved?: boolean;
 }
 
@@ -213,6 +214,8 @@ export interface ScheduleWbsNode {
 }
 
 export interface ScheduleModel {
+  /** Import structural issues that prohibit quantitative network validation. */
+  integrityProblems?: string[];
   /** Lossless source tables, including scheduling options and resource rates. */
   rawTables?: Record<string, { fields: string[]; rows: string[][] }>;
   fileName: string;

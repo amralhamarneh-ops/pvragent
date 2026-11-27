@@ -4,7 +4,7 @@ import { classifyDates, proposeEventDate, hasConflictingEventDates } from './dat
 import { extractStatedQuantities, narrativeFromChanges, reconcile } from './reconcile';
 import { applyQuantitySources, EMPTY_RESOLUTIONS, type Resolutions } from './resolve';
 import type { Extractor } from './extractClient';
-import { parseXer } from '@/lib/mapping/xerParser';
+import { parseXerBytes } from '@/lib/mapping/xerParser';
 import type { ScheduleModel } from '@/lib/mapping/types';
 import type { AnalysisQuestion, AnalysisResult, AnalysisStage, CapabilityReport, DrawingFile, DrawingPair, ExtractedDocument, FileReadiness, FoundDate, MeasuredChange, ProcessingEvent, StatedQuantity } from './types';
 
@@ -147,7 +147,8 @@ export async function analyseDocuments(args: AnalyseArgs): Promise<AnalysisOutpu
       if (e === 'xer' && f.bytes) {
         emit('parsing', 'started', `Parsing programme ${f.name}`, { fileName: f.name });
         try {
-          const model = parseXer(new TextDecoder('utf-8').decode(f.bytes), f.name);
+          const model = parseXerBytes(f.bytes, f.name);
+          if (!model.activityCount || model.integrityProblems?.length) throw new Error(model.warnings?.[0] ?? 'No activities found.');
           schedules.push({ fileName: f.name, model });
           readiness.push({ fileName: f.name, role: 'Schedule', state: 'read', stateLabel: 'Read successfully', detail: `${model.activityCount} activities and ${model.relationships.length} relationships read${model.dataDate ? `; data date ${model.dataDate}` : '; no data date found'}.` });
           log('Read programme', `${f.name}: ${model.activityCount} activities, ${model.relationships.length} relationships.`);
@@ -349,7 +350,7 @@ export async function analyseDocuments(args: AnalyseArgs): Promise<AnalysisOutpu
     if (!p.validated) {
       for (const b of p.blockers) {
         // An answer for one missing unit must never overwrite the partner drawing's independently declared unit.
-        const unknown = [p.original, p.revised].find((f) => f.metresPerUnit === null && b.startsWith(`${f.fileName}:`));
+        const unknown = [p.original, p.revised].find((f) => f.metresPerUnit === null && b.startsWith(`${f.fileName}:`) && /units/i.test(b) && !/coverage incomplete/i.test(b));
         questions.push({ id: `val-${p.revised.fileName}-${questions.length}`, kind: unknown ? 'unit' : 'scale', blocksComparison: true, title: unknown ? `Confirm the units for ${unknown.fileName}` : 'The drawings cannot be compared yet', issue: b, evidence: unknown ? [unknown.fileName] : [p.original.fileName, p.revised.fileName], proposal: unknown ? 'No measurement was taken. Confirm this file’s model units, or export it again with units set.' : 'Nothing was measured. Review both files and confirm they describe the same comparable scope.', options: unknown ? [{ id: 'm', label: 'Units are metres' }, { id: 'cm', label: 'Units are centimetres' }, { id: 'mm', label: 'Units are millimetres' }, { id: 'later', label: 'I will re-export the DXF' }] : [{ id: 'later', label: 'I will fix and re-upload' }] });
       }
       continue;
@@ -361,6 +362,11 @@ export async function analyseDocuments(args: AnalyseArgs): Promise<AnalysisOutpu
     measured.push(...out.changes);
     log('Measure changes', `${p.revised.fileName}: ${out.changes.length} change(s). ${out.notes.join(' ')}`.trim());
     p.revised.validationIssues.concat(p.original.validationIssues).filter((i) => /not measured/.test(i)).forEach((i) => log('Measurement limit', i));
+    for (const n of out.notes.filter((x) => x.startsWith('Coverage incomplete on layer'))) questions.push({
+      id: `coverage-${questions.length}`, kind: 'unsupported_format', blocksComparison: false, title: 'Drawing layer not safe to measure', issue: n,
+      evidence: [p.original.fileName, p.revised.fileName], proposal: 'Provide a measurable CAD export for the affected layer. Other supported layers can still be compared.',
+      options: [{ id: 'later', label: 'I will fix and re-upload' }],
+    });
     for (const n of out.notes.filter((x) => /not evidence of relocation/.test(x))) questions.push({ id: `reloc-${questions.length}`, kind: 'conflict', blocksComparison: false, title: 'Possible relocation needs confirmation', issue: n, evidence: [p.original.fileName, p.revised.fileName], proposal: 'Kept as an omission plus an addition until a statement names this object.', options: [{ id: 'keep', label: 'Keep as omission and addition' }] });
     for (const n of out.notes.filter((x) => /ambiguous correspondence/.test(x))) questions.push({ id: `amb-${questions.length}`, kind: 'correspondence', blocksComparison: false, title: 'Ambiguous correspondence between revisions', issue: n, evidence: [p.original.fileName, p.revised.fileName], proposal: 'Kept as separate omission and addition records until a person decides which elements correspond.', options: [{ id: 'keep', label: 'Keep as omission and addition' }, { id: 'review', label: 'Hold for review' }] });
   }

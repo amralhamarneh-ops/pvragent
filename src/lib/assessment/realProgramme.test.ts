@@ -7,14 +7,14 @@ const weeks = [1,2,3,4,5,6,7].map(d => `(0||${d}()(${d>=2 && d<=6?'(0||0(s|08:00
 const cal = `(0||CalendarData()((0||DaysOfWeek()(${weeks}))(0||VIEW(ShowTotal|Y)())(0||Exceptions()())))`;
 const tbl = (name:string, fields:string[], rows:string[][]) =>
   [['%T',name],['%F',...fields],...rows.map(r=>['%R',...r])].map(row=>row.join('\t')).join('\n');
-function fixture({date='2027-02-01 08:00',remaining='16',lag='0',lagCal='rcal_Successor',finish='2027-02-02 17:00',actual=''}={}) {
+function fixture({date='2027-02-01 08:00',remaining='16',lag='0',lagCal='rcal_Successor',finish='2027-02-02 17:00',actual='',calendarId='1',calendarData=cal}={}) {
   return parseXer([
-    tbl('PROJECT',['proj_id','proj_short_name','clndr_id','last_recalc_date','scd_end_date','critical_path_type'],[['1','TEST','1',date,finish,'CT_TotFloat']]),
+    tbl('PROJECT',['proj_id','proj_short_name','clndr_id','last_recalc_date','scd_end_date','critical_path_type'],[['1','TEST',calendarId,date,finish,'CT_TotFloat']]),
     tbl('SCHEDOPTIONS',['proj_id','sched_retained_logic','sched_progress_override','sched_float_type','sched_calendar_on_relationship_lag'],[['1','Y','N','FT_FF',lagCal]]),
-    tbl('CALENDAR',['clndr_id','clndr_name','day_hr_cnt','clndr_data'],[['1','Test working calendar','8',cal]]),
+    tbl('CALENDAR',['clndr_id','clndr_name','day_hr_cnt','clndr_data'],[[calendarId,'Test working calendar','8',calendarData]]),
     tbl('TASK',['task_id','proj_id','task_type','task_code','task_name','clndr_id','status_code','target_drtn_hr_cnt','remain_drtn_hr_cnt','early_start_date','early_end_date','total_float_hr_cnt','act_start_date'],
-      [['101','1','TT_Task','ACT','Real test activity','1','TK_NotStart','16',remaining,'2027-02-01 08:00',finish,'0',actual],
-       ['102','1','TT_FinMile','END','Finish','1','TK_NotStart','0','0',finish,finish,'0','']]),
+      [['101','1','TT_Task','ACT','Real test activity',calendarId,'TK_NotStart','16',remaining,'2027-02-01 08:00',finish,'0',actual],
+       ['102','1','TT_FinMile','END','Finish',calendarId,'TK_NotStart','0','0',finish,finish,'0','']]),
     tbl('TASKPRED',['task_id','pred_task_id','pred_type','lag_hr_cnt'],[['102','101','PR_FS',lag]]),
   ].join('\n'));
 }
@@ -38,6 +38,24 @@ describe('real programme assessment',()=>{
     expect(d.existingDurationChanges).toEqual([{code:'ACT',before:'16',after:'24'}]);
     expect(d.existingLinkAdds).toBe(1);
     expect(d.existingLinkRemovals).toBe(1);
+  });
+  it('does not flag calendar ID churn in an otherwise identical re-export',()=>{
+    const d=compareProgrammeEvidence(fixture(),fixture({calendarId:'21'}));
+    expect(d.checks).toEqual([]);
+    expect(d.existingCalendarChanges).toBe(0);
+  });
+  it('reports a change to calendar working time or scheduling options independently of stored dates',()=>{
+    const d=compareProgrammeEvidence(fixture(),fixture({calendarData:cal.replace('08:00','09:00'),lagCal:'rcal_Predecessor'}));
+    expect(d.observedCalendarDays).toBe(0);
+    expect(d.projectCalendarChanged).toBe(true);
+    expect(d.existingCalendarChanges).toBe(2);
+    expect(d.changedSettingFields).toEqual(['sched_calendar_on_relationship_lag']);
+    expect(d.checks).toHaveLength(3);
+  });
+  it('blocks source lag precision lost even when display days round to a whole day',()=>{
+    const d=validateRealProgramme(fixture({lag:'8.001'}));
+    expect(d.result).toBeNull();
+    expect(d.reasons.join(' ')).toMatch(/fractional/i);
   });
   it('blocks fractional data and incompatible calendars rather than rounding them',()=>{
     const d=validateRealProgramme(fixture({remaining:'16.1',lag:'4',lagCal:'rcal_Predecessor'}));

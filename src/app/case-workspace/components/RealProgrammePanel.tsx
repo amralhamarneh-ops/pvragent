@@ -38,14 +38,15 @@ export default function RealProgrammePanel({source,references,confirmedTaskIds,o
   const horizon=evidence?.rhs.forecast.slice(0,10);
   const selectedActivity=options.find(a=>(a.taskId??a.id)===taskId);
   const directScenarioComparison = evidence && !evidence.added.length && !evidence.removed &&
-    !evidence.existingLinkAdds && !evidence.existingLinkRemovals && !evidence.existingConstraintChanges &&
+    !evidence.checks.length && !evidence.existingLinkAdds && !evidence.existingLinkRemovals && !evidence.existingConstraintChanges &&
     evidence.existingDurationChanges.length === 1 && evidence.existingDurationChanges[0].code === selectedActivity?.id &&
     !!selectedActivity.hoursPerDay &&
     Number(evidence.existingDurationChanges[0].after)-Number(evidence.existingDurationChanges[0].before) === Number(days)*selectedActivity.hoursPerDay;
   return (
     <section aria-label="Real programme impact" className="rounded-lg border border-border bg-card p-5 space-y-3">
       <h3 className="font-semibold text-foreground">Real programme impact</h3>
-      <p className="text-sm">Input: <strong>{source.fileName}</strong>. {current.activityCount.toLocaleString()} activities, {current.relationships.toLocaleString()} relationships. XER data date: {current.dataDate || 'not available'}. Stored forecast: {current.forecast || 'not available'}.</p>
+      <p className="text-sm">Input: <strong>{source.fileName}</strong>. {current.activityCount.toLocaleString()} activities, {current.relationships.toLocaleString()} relationships{current.unresolvedRelationships ? ` (${current.unresolvedRelationships.toLocaleString()} excluded from logic)` : ''}. XER data date: {current.dataDate || 'not available'}. Stored forecast: {current.forecast || 'not available'}.</p>
+      {Boolean(source.model.warnings?.length) && <details className="text-sm"><summary>XER import notices</summary><ul className="list-disc pl-5">{source.model.warnings?.map((w,i)=><li key={i}>{w}</li>)}</ul></details>}
       <div className="flex flex-wrap gap-3 items-center">
         <button type="button" className="rounded border border-input px-3 py-2 text-sm" onClick={()=>{setValidate(true);setRun(false);}} disabled={validate}>Check unchanged programme</button>
         {references.length>0 ? <label className="text-sm">Processed PVR XER (reference only) <select className="rounded border border-input bg-card px-2 py-1" value={refId} onChange={e=>setRefId(e.target.value)}>
@@ -69,6 +70,7 @@ export default function RealProgrammePanel({source,references,confirmedTaskIds,o
         <p>Processed reference: <strong>{evidence.rhs.forecast || 'forecast not available'}</strong> (data date {evidence.rhs.dataDate || 'not available'}). {evidence.added.length} activities only in the reference; {evidence.removed} only in the source.</p>
         {evidence.observedCalendarDays !== null && <p>Difference between stored forecasts: <strong>{evidence.observedCalendarDays>0 ? '+' : ''}{evidence.observedCalendarDays} calendar days</strong>. This is not a delay recalculated by the tool.</p>}
         <p>Changes among existing activities: {evidence.existingDurationChanges.length} with different durations, {evidence.existingConstraintChanges} with different constraints or expected finish overrides, and {evidence.existingLinkAdds} links added / {evidence.existingLinkRemovals} removed.</p>
+        {evidence.changedSettingFields.length>0 && <details><summary>Changed project and scheduling settings ({evidence.changedSettingFields.length})</summary><p>{evidence.changedSettingFields.join(', ')}</p></details>}
         {evidence.checks.length>0 ? <><p className="font-semibold">Stored result only. Do not attribute the date difference to the variation from this pair.</p>
           <ul className="list-disc pl-5">{evidence.checks.map(c=><li key={c}>{c}</li>)}</ul></> :
           <p>{scenario && horizon && directScenarioComparison ? `Calculated finish ${scenario.after === horizon ? 'matches' : 'does not match'} the reference finish at day precision. Verify scope and logic separately.` : scenario ? 'The single-activity test does not reproduce the changes in this reference. Do not score it as a match.' : 'Reference loaded separately. No independently calculated result to score yet.'}</p>}
