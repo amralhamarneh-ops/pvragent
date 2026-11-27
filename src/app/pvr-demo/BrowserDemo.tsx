@@ -1,0 +1,130 @@
+'use client';
+
+import { useEffect, useState } from 'react';
+import Link from 'next/link';
+import SavedDrawingReplay from '@/app/case-workspace/components/SavedDrawingReplay';
+import { DEMO_KEY, REHEARSAL_LIMIT, loadBrowserRehearsal, runBrowserRehearsal, type BrowserRehearsal } from '@/lib/demo/browserRehearsal';
+
+const fileFields = [
+  ['original', 'Original drawing (DXF)', '.dxf'],
+  ['revised', 'Revised drawing (DXF)', '.dxf'],
+  ['boq', 'BOQ (CSV)', '.csv'],
+  ['reference', 'Optional change instruction or processed PVR (reference only)', '.txt,.pdf,.docx'],
+] as const;
+type Field = (typeof fileFields)[number][0];
+const numberLabel = (n: string | undefined) => n ?? '0';
+
+export default function BrowserDemo() {
+  const [files, setFiles] = useState<Partial<Record<Field,File>>>({});
+  const [run, setRun] = useState<BrowserRehearsal | null>(null);
+  const [status, setStatus] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    try {
+      const saved = loadBrowserRehearsal(localStorage.getItem(DEMO_KEY));
+      if (saved) { setRun(saved); setStatus('Reopened the saved rehearsal. No processing was rerun.'); }
+    } catch { /* The file form remains available when storage is blocked. */ }
+  }, []);
+  const saveCopy = () => {
+    if (!run) return;
+    const url = URL.createObjectURL(new Blob([JSON.stringify(run)],{type:'application/json'}));
+    const a = document.createElement('a');
+    a.href=url; a.download='PVR-rehearsal-result.json'; a.click();
+    window.setTimeout(()=>URL.revokeObjectURL(url), 2000);
+  };
+  const openCopy = async (file?: File) => {
+    if (!file || busy) return;
+    setError(''); setStatus('');
+    try {
+      const restored = file.size <= REHEARSAL_LIMIT * 3 ? loadBrowserRehearsal(await file.text()) : null;
+      if (!restored) throw new Error('Choose a valid rehearsal result exported by this tool.');
+      setRun(restored);
+      try {
+        localStorage.setItem(DEMO_KEY,JSON.stringify(restored));
+        setStatus('Opened the saved rehearsal file. No processing was rerun.');
+      } catch {
+        setStatus('Opened the saved rehearsal file. No processing was rerun.');
+        setError('This browser did not retain it. Keep the original saved file.');
+      }
+    } catch (err) { setError(err instanceof Error ? err.message : 'Could not open the rehearsal file.'); }
+  };
+  const start = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const {original,revised,boq,reference} = files;
+    if (busy || !original || !revised || !boq) return;
+    if (original.size > 8_000_000 || revised.size > 8_000_000 || boq.size > 2_000_000) { setError('Use DXF files up to 8 MB each and a BOQ CSV up to 2 MB.'); return; }
+    setBusy(true); setError(''); setStatus('Reading the selected files…');
+    try {
+      const [a,b,c] = await Promise.all([original,revised,boq].map(async f => ({name:f.name,bytes:new Uint8Array(await f.arrayBuffer())})));
+      const result = await runBrowserRehearsal(a,b,c,reference?.name,setStatus);
+      setRun(result);
+      try {
+        localStorage.setItem(DEMO_KEY, JSON.stringify(result));
+        if (loadBrowserRehearsal(localStorage.getItem(DEMO_KEY))?.savedAt !== result.savedAt) throw new Error();
+        setStatus('Saved in this browser. Reopen this page in the same profile to replay without processing again.');
+      } catch {
+        setStatus('');
+        setError('Processing finished, but the browser could not save the result. Keep this tab open.');
+      }
+    } catch (err) { setStatus(''); setError(err instanceof Error ? err.message : 'The demo could not be processed.'); }
+    finally { setBusy(false); }
+  };
+  return <main className="mx-auto max-w-6xl space-y-5 p-4 lg:p-8">
+    <div>
+      <Link href="/new-pvr" className="text-sm underline">Back to New PVR</Link>
+      <h1 className="mt-2 text-3xl font-semibold">PVR rehearsal: drawings &amp; BOQ</h1>
+      <p className="mt-1 text-muted-foreground">Browser-only demo. Use synthetic files only. The latest rehearsal is saved in this browser profile, not on the server. No cost, schedule impact or approvals.</p>
+    </div>
+    <details className="rounded-lg border border-border bg-card p-4" open={run ? undefined : true}>
+      <summary className="cursor-pointer font-semibold">Run a new rehearsal</summary>
+      <form onSubmit={start} className="mt-3 space-y-3">
+        <div className="grid gap-3 sm:grid-cols-2">
+          {fileFields.map(([id,label,accept]) => <label key={id} className="grid gap-1 text-sm font-medium">{label}
+            <input type="file" accept={accept} required={id!=='reference'} disabled={busy} onChange={e => setFiles(p=>({...p,[id]:e.target.files?.[0]}))} className="rounded border border-input p-2" />
+          </label>)}
+        </div>
+        <button disabled={busy || !files.original || !files.revised || !files.boq} type="submit" className="rounded bg-primary px-4 py-2 font-semibold text-primary-foreground disabled:opacity-50">Process and save rehearsal</button>
+      </form>
+    </details>
+    <div className="flex flex-wrap items-center gap-3 rounded-lg border border-border bg-card p-3 text-sm">
+      <label className="grid gap-1 font-medium">Open saved rehearsal file
+        <input aria-label="Open saved rehearsal file" type="file" accept=".json" disabled={busy} onChange={e=>{const f=e.target.files?.[0];e.target.value='';void openCopy(f);}} />
+      </label>
+      {run ? <button type="button" onClick={saveCopy} className="rounded border border-input px-3 py-2">Download rehearsal backup</button> : null}
+      <p className="text-xs text-muted-foreground">Only open rehearsal files you trust. A backup shows recorded results; it does not recheck the source files.</p>
+    </div>
+    {status ? <p role="status" className="text-sm font-medium">{status}</p> : null}
+    {error ? <p role="alert" className="rounded border border-destructive/40 p-3 text-sm text-destructive">{error}{run ? ' The result shown below is from the latest completed run.' : ''}</p> : null}
+    {run ? <div className="space-y-5">
+      <section className="rounded-lg border border-border bg-card p-4" aria-label="Measured quantities and BOQ mapping">
+        <h2 className="text-xl font-semibold">Measured quantities and BOQ mapping</h2>
+        <p className="text-sm text-muted-foreground">{run.boqRows} BOQ item(s) read. Mappings are proposals, not approvals. Quantities come from the drawing comparison only.</p>
+        <div className="mt-3 overflow-x-auto"><table className="w-full text-left text-sm">
+          <thead><tr className="border-b"><th className="p-2">Drawing change</th><th className="p-2">Measured delta</th><th className="p-2">Proposed BOQ item</th><th className="p-2">Source and review</th></tr></thead>
+          <tbody>{run.changes.map(c=>{
+            const m=run.mappings.find(x=>x.id===c.id);
+            return <tr key={c.id} className="align-top border-b">
+              <th scope="row" className="p-2">{c.component}</th>
+              <td className="p-2">{c.netQty ?? c.changeQty} {c.unit}<p className="text-xs text-muted-foreground">Added {numberLabel(c.addedQty)} · omitted {numberLabel(c.omittedQty)}</p></td>
+              <td className="p-2">{m?.proposal ? <><strong>{m.proposal.ref}</strong> · {m.proposal.description}</> : 'Held for review'}</td>
+              <td className="p-2"><p>{m?.reason}</p>{m?.proposal ? <p className="text-xs">{m.proposal.file} · {m.proposal.sheet} · row {m.proposal.row}</p> : null}
+                <details className="mt-1 text-xs"><summary className="cursor-pointer underline">Drawing quantity evidence</summary><p>{c.description}</p><p>{c.trace?.formula} · {c.trace?.drawingRevision}</p><p>{c.sources.join(' · ')}</p></details>
+              </td>
+            </tr>;
+          })}</tbody>
+        </table></div>
+      </section>
+      <SavedDrawingReplay key={run.savedAt} replay={run.replay} changes={run.changes} />
+      <section className="rounded-lg border border-border bg-card p-4" aria-label="Saved processing steps">
+        <h2 className="text-xl font-semibold">Saved processing steps</h2>
+        <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm">{run.events.map(event=><li key={event.step}><strong>{event.step}</strong>: {event.detail}</li>)}</ol>
+        <h3 className="mt-3 font-semibold">Input files</h3>
+        <ul className="text-sm">{run.sources.map(s=><li key={s.role} title={s.sha256}>{s.role}: {s.name}</li>)}</ul>
+        <details className="mt-3 text-sm"><summary className="cursor-pointer underline">Drawing reader checks</summary>
+          <ul className="mt-2 space-y-1">{run.reads.map(r=><li key={r.fileName}>{r.fileName} · {r.stateLabel}: {r.detail}</li>)}</ul>
+        </details>
+      </section>
+    </div> : null}
+  </main>;
+}
