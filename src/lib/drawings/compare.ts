@@ -3,6 +3,23 @@ import type { AnalysisQuestion, DrawingEntity, DrawingFile, DrawingPair, Measure
 
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
+/** Exclude explicit presentation layers, not physical layers merely containing a word such as "detail". */
+export function isPresentationLayer(layer: string): boolean {
+  const parts = layer.split(/[|$]/).map(norm);
+  return parts.some((p) => /(?:^| )(?:anno(?:tation)?s?|title ?block|viewport|legend|sheet border|drawing frame)(?: |$)/.test(p));
+}
+
+/** A typical detail documents configuration, not installation extents. Use the sheet title, not an incidental note. */
+export function isDetailOnlyTitle(rawTitle: string): boolean {
+  const title = norm(rawTitle);
+  return /\btypical (?:detail|details|section|sections|assembly|assemblies)\b|\b(?:front|side|sectional) (?:view|elevation)\b/.test(title)
+    && !/\b(?:alignment|chainage|layout(?: plan)?|site plan|location plan|setting out)\b/.test(title);
+}
+
+export function isDetailOnlyDrawing(file: DrawingFile): boolean {
+  return !!file.detailOnlyEvidence || isDetailOnlyTitle(file.titleBlock?.title ?? '');
+}
+
 function titleSimilarity(a: string, b: string): number {
   const x = new Set(norm(a).split(' ').filter((w) => w.length > 2));
   const y = new Set(norm(b).split(' ').filter((w) => w.length > 2));
@@ -33,7 +50,7 @@ export function pairDrawings(files: DrawingFile[]): PairingOutcome {
   for (const f of usable) {
     const n = f.titleBlock?.drawingNumber ?? '';
     if (!n) { noNumber.push(f); continue; }
-    const key = n.toUpperCase();
+    const key = n.toUpperCase().replace(/_/g, '-');
     groups.set(key, [...(groups.get(key) ?? []), f]);
   }
 
@@ -85,6 +102,7 @@ export function validatePair(p: DrawingPair): DrawingPair {
   const blockers: string[] = [];
   const { original: o, revised: r } = p;
   for (const f of [o, r]) {
+    if (isDetailOnlyDrawing(f)) blockers.push(`${f.fileName}: typical detail/elevation layout shows configuration, not installed extent. Supply an alignment/layout or chainage schedule.`);
     if (f.metresPerUnit === null) blockers.push(`${f.fileName}: ${f.validationIssues.find((i) => /units/i.test(i)) ?? 'units are not established'}`);
   }
   if (o.metresPerUnit !== null && r.metresPerUnit !== null && o.metresPerUnit !== r.metresPerUnit) blockers.push(`The two drawings use different units (${o.unit} and ${r.unit}), so they are not directly comparable until the units are confirmed.`);
@@ -369,6 +387,14 @@ const refOf = (e: DrawingEntity): { handle: string; kind: string; layer: string;
 export function measurePair(pair: DrawingPair, tolerance = 0.01, relocationEvidence: RelocationInput = false): MeasureOutcome {
   const notes: string[] = [];
   if (!pair.validated) return { changes: [], notes: ['Pair is not validated, so nothing was measured.'] };
+  const detailFiles = [pair.original, pair.revised].filter(isDetailOnlyDrawing).map((f) => f.fileName);
+  if (detailFiles.length) return {
+    changes: [],
+    notes: [`Typical detail/elevation sheet(s) ${detailFiles.join(', ')} show configuration, not the installed extent. A corresponding plan/chainage drawing or a referenced quantity schedule is needed for a takeoff.`],
+  };
+  if (!pair.original.metresPerUnit || !pair.revised.metresPerUnit) {
+    return {changes: [], notes: ['Both drawing units must be established before measuring.']};
+  }
   const mpuO = pair.original.metresPerUnit ?? 1; const mpuR = pair.revised.metresPerUnit ?? 1;
   const a = totals(pair.original); const b = totals(pair.revised);
   const shift = pair.originShift ? { dx: pair.originShift.dx, dy: pair.originShift.dy } : null;
@@ -377,6 +403,10 @@ export function measurePair(pair: DrawingPair, tolerance = 0.01, relocationEvide
   const changes: MeasuredChange[] = [];
   const srcOf = (f: DrawingFile, layer: string) => `${f.fileName} · layer ${layer}`;
   for (const d of diffs) {
+    if (isPresentationLayer(d.layer)) {
+      notes.push(`Layer ${d.layer}: annotation/frame/legend geometry was excluded from quantities.`);
+      continue;
+    }
     const ta = a.get(d.layer); const tb = b.get(d.layer);
     const kind = kindFor(tb ?? ta!) ?? kindFor(ta ?? tb!);
     if (!kind) { notes.push(`Layer ${d.layer}: no measurable geometry.`); continue; }

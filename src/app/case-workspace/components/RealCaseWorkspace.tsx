@@ -28,6 +28,7 @@ import { ExcludeModal, ManualRateModal } from '@/app/case-workspace/components/L
 import { buildBoqSet } from '@/lib/boq/matchEngine';
 import { readItems, writeItems, prefillFromComponent, type AssessmentItem, type ItemDraft } from '@/lib/boq/newItem';
 import { loadCaseSchedules, type ScheduleLoadResult } from '@/lib/mapping/scheduleLoader';
+import RealProgrammePanel, { referenceOnlyProgramme } from '@/app/case-workspace/components/RealProgrammePanel';
 import { buildSharedLines, buildSharedLinesDetailed } from '@/lib/mapping/sharedLines';
 import type { MappingChoices } from '@/lib/mapping/realActivityMapping';
 import ValuationPanel from '@/app/case-workspace/components/ValuationPanel';
@@ -82,6 +83,7 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
   const [schedLoading, setSchedLoading] = useState(false);
   const [schedIdx, setSchedIdx] = useState(0);
   const [mapChoices, setMapChoices] = useState<MappingChoices>({});
+  const [mappingProgrammeHash, setMappingProgrammeHash] = useState('');
   const [schedExcl, setSchedExcl] = useState<Record<string, ScheduleExclusion>>({});
   const [decisions, setDecisions] = useState<DecisionStore>(EMPTY_DECISIONS);
   const [invalidatedCount, setInvalidatedCount] = useState(0);
@@ -108,17 +110,17 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
     setDecisions(readDecisions(caseId));
     try {
       const raw = window.localStorage.getItem(MAP_KEY);
-      const p = raw ? (JSON.parse(raw) as { choices?: MappingChoices; excl?: Record<string, ScheduleExclusion>; partial?: boolean }) : {};
-      setMapChoices(p.choices ?? {}); setSchedExcl(p.excl ?? {}); setPartialAccepted(!!p.partial);
-    } catch { setMapChoices({}); setSchedExcl({}); }
+      const p = raw ? (JSON.parse(raw) as { choices?: MappingChoices; excl?: Record<string, ScheduleExclusion>; partial?: boolean; programmeHash?: string }) : {};
+      setMappingProgrammeHash(p.programmeHash ?? ''); setMapChoices(p.choices ?? {}); setSchedExcl(p.excl ?? {}); setPartialAccepted(!!p.partial);
+    } catch { setMappingProgrammeHash(''); setMapChoices({}); setSchedExcl({}); }
     setHydrated(true);
   }, [caseId, MAP_KEY]);
 
   // Persist mapping decisions (by stable line id) so a reload restores them.
   useEffect(() => {
     if (!hydrated) return;
-    try { window.localStorage.setItem(MAP_KEY, JSON.stringify({ choices: mapChoices, excl: schedExcl, partial: partialAccepted })); } catch { /* reported when a decision is made */ }
-  }, [hydrated, MAP_KEY, mapChoices, schedExcl, partialAccepted]);
+    try { window.localStorage.setItem(MAP_KEY, JSON.stringify({ choices: mapChoices, excl: schedExcl, partial: partialAccepted, programmeHash: mappingProgrammeHash })); } catch { /* reported when a decision is made */ }
+  }, [hydrated, MAP_KEY, mapChoices, schedExcl, partialAccepted, mappingProgrammeHash]);
 
   // `answers` is assembled further down, once the active BOQ set and the current run are known: persisted decisions are
   // keyed by stable line id and are re-attached to whichever component ids the current run produced.
@@ -315,11 +317,23 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
     void loadCaseSchedules(caseId).then((r) => { if (!cancelled) { setSchedLoad(r); setSchedIdx(0); setSchedLoading(false); } }).catch(() => { if (!cancelled) setSchedLoading(false); });
     return () => { cancelled = true; };
   }, [caseId, mapRetry]);
-  const activeSchedule = schedLoad?.schedules[schedIdx] ?? null;
+  const inputSchedules = useMemo(() => schedLoad?.schedules.filter(s => !referenceOnlyProgramme(s)) ?? [], [schedLoad]);
+  const referenceSchedules = useMemo(() => schedLoad?.schedules.filter(referenceOnlyProgramme) ?? [], [schedLoad]);
+  const activeSchedule = inputSchedules[schedIdx] ?? null;
 
   // A changed programme invalidates choices that pointed at its activities.
   useEffect(() => {
     if (!hydrated || !schedLoad || !activeSchedule) return;
+    if (mappingProgrammeHash !== activeSchedule.sha256) {
+      setMapChoices(cur => Object.fromEntries(Object.entries(cur).flatMap(([key,value]) => {
+        if (!value.activityTaskIds?.length) return [[key,value]];
+        const {activityTaskIds: _ids, shares: _shares, ...rest} = value;
+        return Object.keys(rest).length ? [[key,rest]] : [];
+      })));
+      setMappingProgrammeHash(activeSchedule.sha256);
+      setAssessmentConfirmed(false);
+      return;
+    }
     const known = new Set(activeSchedule.model.activities.map((a) => a.taskId ?? a.id));
     setMapChoices((cur) => {
       let changed = false; const next: MappingChoices = {};
@@ -329,7 +343,7 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
       }
       return changed ? next : cur;
     });
-  }, [hydrated, schedLoad, activeSchedule]);
+  }, [hydrated, schedLoad, activeSchedule, mappingProgrammeHash]);
 
   /** Resolve a line (by stable id) through the same resolution model for both the cost review and the activity panel. */
   const resolveLine = useCallback((lineId: string, next: LineResolution | undefined) => {
@@ -402,7 +416,7 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
     const heldIds = new Set(sharedLines.filter((s) => s.heldForOverlap).map((s) => s.componentId));
     const lines = outcome.lines.filter((l) => l.valued && !l.excluded && !l.deferred && !heldIds.has(l.componentId) && (l.manual || (l.calc && l.calc.ok)));
     // Priced assessment items (quantity and rate both given) are part of the cost. Unpriced ones stay unpriced, never zero.
-    const pricedItems = items2.filter((it) => it.quantity !== null && it.rate !== null && !answers.resolutions?.[it.linkedScope || it.id] && !decisions.decisions[`new|${it.id}`]);
+    const pricedItems = items2.filter((it) => it.quantity !== null && it.rate !== null && !heldIds.has(it.id) && !answers.resolutions?.[it.linkedScope || it.id] && !decisions.decisions[`new|${it.id}`]);
     if (lines.length === 0 && pricedItems.length === 0) { toast.error('There are no priced lines to confirm.'); return; }
     setSavingCalc(true);
     let saved = 0; let failed = '';
@@ -437,10 +451,10 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
         const q = m.quantityText.split(' ');
         record = {
           id: newId('calc'), caseId: loaded.case.id, createdAt: new Date().toISOString(),
-          description: `${l.componentName} · Manual rate · Proposed (${m.rate.reason}; entered by ${m.rate.enteredBy})`,
+          description: m.rate.processedPvr ? `${l.componentName} · Processed PVR · Pilot only (${m.rate.processedPvr.file}, page ${m.rate.processedPvr.page}, ${m.rate.processedPvr.row}; ${m.rate.reason}; entered by ${m.rate.enteredBy})` : `${l.componentName} · Manual rate · Proposed (${m.rate.reason}; entered by ${m.rate.enteredBy})`,
           direction: m.amountSigned.startsWith('-') ? 'omission' : 'addition',
           importId: owner.id, importRevision: owner.revision, importFileName: owner.source.fileName, importSha256: owner.source.sha256,
-          itemId: l.item.id, itemRef: 'MANUAL', itemDescription: l.componentName, sheet: 'Manual rate', rowNumber: 0, rateCell: '',
+          itemId: l.item.id, itemRef: m.rate.processedPvr ? 'PVR-PILOT' : 'MANUAL', itemDescription: l.componentName, sheet: m.rate.processedPvr ? 'Processed PVR pilot' : 'Manual rate', rowNumber: 0, rateCell: '',
           rate: m.rate.value, currency: m.rate.currency, boqUnit: m.rate.unit, quantity: q[0] ?? '', quantityUnit: q.slice(1).join(' '), convertedQuantity: q[0] ?? '',
           signedAmount: m.amountSigned, formula: m.formula,
           conversion: { type: 'identity', originalQuantity: q[0] ?? '', originalUnit: q.slice(1).join(' '), derivedQuantity: q[0] ?? '', derivedUnit: m.rate.unit, derivation: 'Manual rate in the quantity unit', supportingInputs: [], basis: null },
@@ -755,20 +769,20 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
             </section>
           ) : null}
 
+          {inputSchedules.length > 1 ? (
+                <div className="flex items-center gap-2 text-sm"><label htmlFor="sched-pick" className="text-muted-foreground">Programme in use</label>
+                  <select id="sched-pick" value={schedIdx} onChange={(e) => setSchedIdx(Number(e.target.value))} className="rounded-md border border-input bg-card px-2 py-1 text-foreground">{inputSchedules.map((s, i) => <option key={s.docId} value={i}>{s.fileName}{s.subrole ? ` (${s.subrole})` : ''}</option>)}</select></div>
+              ) : null}
+          {schedLoad && schedLoad.problems.length > 0 ? <ul role="status" className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-foreground">{schedLoad.problems.map((pr) => <li key={pr.fileName}><span className="font-medium">{pr.fileName}</span>: {pr.reason}</li>)}</ul> : null}
           {agentRun ? (
             <>
-              {schedLoad && schedLoad.schedules.length > 1 ? (
-                <div className="flex items-center gap-2 text-sm"><label htmlFor="sched-pick" className="text-muted-foreground">Programme in use</label>
-                  <select id="sched-pick" value={schedIdx} onChange={(e) => setSchedIdx(Number(e.target.value))} className="rounded-md border border-input bg-card px-2 py-1 text-foreground">{schedLoad.schedules.map((s, i) => <option key={s.docId} value={i}>{s.fileName}{s.subrole ? ` (${s.subrole})` : ''}</option>)}</select></div>
-              ) : null}
-              {schedLoad && schedLoad.problems.length > 0 ? <ul role="status" className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-foreground">{schedLoad.problems.map((pr) => <li key={pr.fileName}><span className="font-medium">{pr.fileName}</span>: {pr.reason}</li>)}</ul> : null}
               {schedLoading ? <div className="skeleton h-24 rounded-lg" role="status" aria-label="Reading programme" /> : (
                 <ActivityMappingPanel
                   model={activeSchedule?.model ?? null}
                   scheduleFileName={activeSchedule?.fileName ?? ''}
                   lines={sharedLines}
-                  choices={mapChoices}
-                  onChoices={(c) => { setMapChoices(c); setAssessmentConfirmed(false); }}
+                  choices={mappingProgrammeHash === activeSchedule?.sha256 ? mapChoices : {}}
+                  onChoices={(c) => { setMappingProgrammeHash(activeSchedule?.sha256 ?? ''); setMapChoices(c); setAssessmentConfirmed(false); }}
                   scheduleExclusions={schedExcl}
                   onScheduleExclusion={(id, ex) => {
                     setSchedExcl((cur) => { const n = { ...cur }; if (ex) n[id] = ex; else delete n[id]; return n; });
@@ -788,6 +802,9 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
             </>
           ) : null}
 
+          {activeSchedule ? <RealProgrammePanel key={activeSchedule.sha256} source={activeSchedule} references={referenceSchedules}
+            confirmedTaskIds={mappingProgrammeHash === activeSchedule.sha256 ? sharedLines.filter(l => l.work.executes && !schedExcl[l.lineId] && !mapChoices[l.lineId]?.state).flatMap(l => mapChoices[l.lineId]?.activityTaskIds ?? []) : []} />
+            : referenceSchedules.length > 0 ? <p role="status">A processed programme is available. Upload the pre-impact XER separately to compare the two.</p> : null}
           {itemModal ? (
             <NewItemEntry key={itemModal.existing?.id ?? 'new'} open caseId={caseId} currency={loaded.case.currency || 'AED'} initial={itemModal.draft} existing={itemModal.existing} set={boqSet}
               scopeOptions={(agentRun?.scope.components ?? []).map((c) => ({ id: c.id, label: c.name }))} onClose={() => setItemModal(null)} onSaveItem={saveItem} onAddBoqItem={addBoqItemToScope} newId={() => newId('item')} />
@@ -798,7 +815,7 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
             const comp = agentRun?.scope.components.find((c) => c.id === l?.componentId);
             const q = l ? (answers.quantity[l.componentId] ?? comp?.quantity ?? (l.work.quantity ? { value: l.work.quantity, unit: l.work.unit } : null)) : null;
             const existing = l ? answers.resolutions?.[l.componentId] : undefined;
-            return <ManualRateModal key={`pm-${panelManual}`} open line={l ? ({ componentName: l.name } as never) : null} currency={loaded.case.currency || 'AED'} quantity={q ? { value: q.value, unit: q.unit } : null} direction={l?.work.action === 'omit' ? 'omission' : 'addition'} existing={existing?.kind === 'manual_rate' ? existing.manual : undefined} onClose={() => setPanelManual(null)} onSave={(m) => { resolveLine(panelManual, { kind: 'manual_rate', manual: m }); setPanelManual(null); }} />;
+            return <ManualRateModal key={`pm-${panelManual}`} open line={l ? ({ componentName: l.name } as never) : null} currency={loaded.case.currency || 'AED'} quantity={q ? { value: q.value, unit: q.unit } : null} scope={comp} direction={l?.work.action === 'omit' ? 'omission' : 'addition'} existing={existing?.kind === 'manual_rate' ? existing.manual : undefined} onClose={() => setPanelManual(null)} onSave={(m) => { resolveLine(panelManual, { kind: 'manual_rate', manual: m }); setPanelManual(null); }} />;
           })() : null}
           {panelExclude ? <ExcludeModal key={`px-${panelExclude}`} open line={lineById.get(panelExclude) ? { componentName: lineById.get(panelExclude)!.name } : null} onClose={() => setPanelExclude(null)} onSave={(r) => { resolveLine(panelExclude, r); setPanelExclude(null); }} /> : null}
           {panelDefer ? <DeferModal key={`pd-${panelDefer}`} open line={lineById.get(panelDefer) ? { componentName: lineById.get(panelDefer)!.name } : null} onClose={() => setPanelDefer(null)} onSave={(r) => { resolveLine(panelDefer, r); setPanelDefer(null); }} /> : null}

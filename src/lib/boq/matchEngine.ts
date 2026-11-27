@@ -3,7 +3,7 @@ import { calculateChange, recordsFromImport } from './calc';
 import { buildRowContext, type RowContext } from './context';
 import { planConversion } from './units';
 import { retrieveCandidates, type RetrievedCandidate } from './retrieve';
-import { priceWithManualRate, summariseCost, type CostSummary, type ExclusionScope, type LineResolution, type ManualRate, type Resolutions, type SummaryLine } from './resolutions';
+import { priceWithManualRate, validProcessedPvrRate, summariseCost, type CostSummary, type ExclusionScope, type LineResolution, type ManualRate, type Resolutions, type SummaryLine } from './resolutions';
 import type { BoqImport, BoqItemRecord, CalcResult } from './types';
 import type { ChangeScope, CandidateBrief, ModelMatchResult, ScopeComponent } from './scope';
 
@@ -251,6 +251,7 @@ export function assemble(set: BoqSet, scope: ChangeScope, proposal: ModelMatchRe
   const resolvedOnly: AssessmentOutcome['resolvedOnly'] = [];
   const deferredOnly: AssessmentOutcome['deferredOnly'] = [];
   const resolutions = answers.resolutions ?? {};
+  const usedPvrRows = new Set<string>();
   for (const comp of scope.components) {
     const res = resolutions[comp.id];
     if (!res) continue;
@@ -281,8 +282,31 @@ export function assemble(set: BoqSet, scope: ChangeScope, proposal: ModelMatchRe
 
     if (res.kind === 'manual_rate') {
       if (!q) continue;
+      const fallback = res.manual.processedPvr;
+      const fallbackRow = fallback ? JSON.stringify([fallback.file, String(Number(fallback.page)), fallback.row].map((v) => v.trim().toLowerCase())) : '';
+      if (fallback) {
+        // A selected, usable BOQ rate wins. A fallback cannot bypass a
+        // unit conflict, unanswered scope/BOQ selection, or duplicate pricing.
+        if (primaryLine?.calc?.ok) continue;
+        const blocked = (primaryLine?.calc && !primaryLine.calc.ok && primaryLine.calc.kind !== 'unpriced')
+          || primaryLine?.specConflict
+          || (primaryLine && !['identity', 'same_dimension'].includes(planConversion(q.unit, primaryLine.item.unit).kind))
+          || potentials.some((p) => p.componentId === comp.id)
+          || needs.some((n) => n.componentId === comp.id && ['ambiguous_candidates', 'overlap', 'missing_dimension', 'unit_mismatch'].includes(n.kind))
+          || (!primaryLine && answers.chosenRow[comp.id] !== '__none__' && lines.some((l) => l.componentId === comp.id))
+          || usedPvrRows.has(fallbackRow)
+          || !validProcessedPvrRate(res.manual, comp, q.unit, currency);
+        if (blocked) {
+          needs.push({ id: `pvr-fallback-${comp.id}`, kind: 'missing_rate', componentId: comp.id,
+            title: `Processed PVR rate not applied: ${comp.name}`,
+            issue: 'Check the source file, page, unique item/row, case currency, unit and scope. Resolve ambiguity or overlapping work before applying the fallback.',
+            evidence: [], proposal: 'Review the processed PVR source and matching scope.', options: [] });
+          continue;
+        }
+      }
       const priced = priceWithManualRate({ quantity: q.value, quantityUnit: q.unit, rate: res.manual.value, rateUnit: res.manual.unit, currency: res.manual.currency, direction, zeroBasis: res.manual.zeroBasis, requireZeroBasis: true });
       if (!priced.ok) continue; // A rejected pairing is never applied silently; the editor reports why.
+      if (fallback) usedPvrRows.add(fallbackRow);
       const base: RelatedLine = primaryLine ?? {
         key: `${comp.id}|manual`, componentId: comp.id, componentName: comp.name,
         item: manualItem(comp.id, comp.name, res.manual),
@@ -294,7 +318,7 @@ export function assemble(set: BoqSet, scope: ChangeScope, proposal: ModelMatchRe
       base.status = 'ready';
       base.rateSource = 'manual_proposed';
       base.manual = { rate: res.manual, amountSigned: priced.signedAmount, formula: priced.formula, quantityText: `${priced.quantity} ${priced.quantityUnit}` };
-      base.statusNote = 'Manual rate · Proposed. Not commercially approved.';
+      base.statusNote = fallback ? 'Processed PVR rate · Pilot only. Not an approved BOQ rate.' : 'Manual rate · Proposed. Not commercially approved.';
       if (!primaryLine) lines.push(base);
       removeNeeds(needs, comp.id, ['missing_rate', 'no_item', 'missing_dimension', 'unit_mismatch']);
       const ui = unmatched.findIndex((u) => u.componentId === comp.id);

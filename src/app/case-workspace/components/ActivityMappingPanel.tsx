@@ -100,6 +100,8 @@ export default function ActivityMappingPanel(p: Props) {
           {m.mappings.map((x) => {
             const line = p.lines.find((l) => l.lineId === x.lineId) as SharedLine;
             const isOpen = !!open[x.lineId];
+            const selection = p.choices[x.lineId];
+            const selectedIds = selection?.activityTaskIds ?? [];
             return (
               <li key={x.lineId} className="rounded-md border border-border bg-background p-3">
                 <div className="flex flex-wrap items-start justify-between gap-2">
@@ -153,12 +155,27 @@ export default function ActivityMappingPanel(p: Props) {
                             <span className="min-w-0"><span className="font-data font-semibold text-foreground">{c.activity.code}</span> <span className="text-foreground">{c.activity.name}</span>
                               <span className="block text-xs text-muted-foreground">{c.activity.wbsPath || 'no WBS'} · {c.activity.kind.replace('_', ' ')} · {c.activity.status.replace('_', ' ')}{c.activity.status === 'in_progress' ? ` ${c.activity.progressPct}%` : ''} · score {c.score}</span>
                               {c.violations.length ? <span className="block text-xs text-destructive">Cannot take this work: {c.violations[0]}</span> : null}
+                              {c.review.length && !c.violations.length ? <span className="block text-xs text-muted-foreground">Needs verification: {c.review.join(' ')}</span> : null}
                               {c.cautions.length && !c.violations.length ? <span className="block text-xs text-muted-foreground">{c.cautions[0]}</span> : null}</span>
-                            <button type="button" disabled={!c.eligible} onClick={() => setChoice(x.lineId, { activityTaskIds: [...(p.choices[x.lineId]?.activityTaskIds ?? []).filter((id) => id !== c.activity.taskId), c.activity.taskId] })} className="shrink-0 rounded-md border border-input bg-card px-2 py-1 text-xs font-medium hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50">{c.eligible ? 'Select' : 'Not valid'}</button>
+                            <button type="button" disabled={!c.eligible} onClick={() => setChoice(x.lineId, { ...selection, activityTaskIds: selectedIds.includes(c.activity.taskId) ? selectedIds.filter((id) => id !== c.activity.taskId) : [...selectedIds, c.activity.taskId] })} className="shrink-0 rounded-md border border-input bg-card px-2 py-1 text-xs font-medium hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50">{c.eligible ? (selectedIds.includes(c.activity.taskId) ? 'Unselect' : c.review.length ? 'Select after verifying' : 'Select') : 'Not valid'}</button>
                           </li>
                         ))}
                       </ul>
                     ) : null}
+                  </div>
+                ) : null}
+
+                {selectedIds.length > 1 ? (
+                  <div className="mt-2 rounded-md border border-border bg-card p-2 text-xs">
+                    <p>Split across selected activities only where supported. Enter percentages totaling 100%.</p>
+                    {selectedIds.map((id) => (
+                      <label key={id} className="mt-1 flex items-center gap-2">
+                        {p.model?.activities.find((a) => (a.taskId ?? a.id) === id)?.id ?? id}
+                        <input type="number" min="0.000001" max="100" step="any" value={selection?.shares?.[id] ?? ''}
+                          onChange={(event) => setChoice(x.lineId, { ...selection, activityTaskIds: selectedIds, shares: { ...selection?.shares, [id]: event.target.value } })}
+                          className="w-24 rounded border border-input bg-background px-1 py-0.5" /> %
+                      </label>
+                    ))}
                   </div>
                 ) : null}
 

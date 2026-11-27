@@ -1,19 +1,18 @@
 import { classifyDates } from './dates';
 import type { TitleBlock } from './types';
 
-const NUM_LABEL = /(?:DWG\.?\s*(?:NO|NUMBER|#)|DRAWING\s*(?:NO|NUMBER|#)|DRG\.?\s*NO|SHEET\s*NO)\s*[.:=\-]?\s*([A-Z0-9][A-Z0-9\-_./]{2,40})/i;
+const NUM_LABEL = /(?:DWG\.?\s*(?:NO|NUMBER|#)|DRAWING\s*(?:NO|NUMBER|#)|DRG\.?\s*NO|SHEET\s*NO)\s*[.:=\-]?\s*([A-Z0-9][A-Z0-9\-_./]{2,100})/i;
 const REV_LABEL = /(?:\bREV(?:ISION)?\.?\s*[:=\-]?\s*)([A-Z]{1,2}\d{0,2}|\d{1,2})\b/i;
 const TITLE_LABEL = /(?:DWG\.?\s*TITLE|DRAWING\s*TITLE|TITLE)\s*[:=\-]\s*([^\n\r]{3,100})/i;
 
-/** Drawing number pattern used only as a fallback: letters/digits with dashes, containing at least one digit. */
-const NUM_SHAPE = /\b([A-Z]{1,6}[-_][A-Z0-9]{1,8}(?:[-_][A-Z0-9]{1,8}){0,3})\b/;
-
+/** A filename is only a drawing ID fallback if it is an identifier, not a free-text title. Preserve every
+ * segment (especially the numbered sheet suffix); truncating a long ID groups distinct sheets as revisions. */
 function fromFileName(name: string): { number: string; rev: string } {
-  const base = name.replace(/\.[^.]+$/, '');
-  const rev = (base.match(/[-_ ]rev[-_ ]?([a-z0-9]{1,3})\b/i) ?? [])[1] ?? '';
-  const withoutRev = base.replace(/[-_ ]rev[-_ ]?[a-z0-9]{1,3}\b/i, '');
-  const num = (withoutRev.match(NUM_SHAPE) ?? [])[1] ?? '';
-  return { number: /\d/.test(num) ? num : '', rev: rev.toUpperCase() };
+  const base = (name.split(/[\\/]/).at(-1) ?? name).replace(/\.[^.]+$/, '');
+  const suffix = base.match(/(?:[-_ ](?:rev|ver)[-_ ]?([a-z0-9]{1,5})|\[([a-z]+[0-9]+|[0-9]+)\](?:[-_]\2)?|[-_]([CP]\d{2}))$/i);
+  const rev = (suffix?.[1] ?? suffix?.[2] ?? suffix?.[3] ?? '').toUpperCase();
+  const id = (suffix ? base.slice(0, suffix.index) : base).replace(/[-_ ]+$/, '');
+  return { number: /^(?=.*[a-z])(?=.*\d)[a-z0-9]+(?:[-_][a-z0-9]+)+$/i.test(id) ? id.toUpperCase() : '', rev };
 }
 
 /**

@@ -1,5 +1,5 @@
 import { readDxf } from './dxfRead';
-import { pairDrawings, measurePair, validatePair, hasRelocationEvidence, relocationSentences, evidenceForObject, type RelocationInput } from './compare';
+import { pairDrawings, measurePair, validatePair, hasRelocationEvidence, relocationSentences, evidenceForObject, isDetailOnlyTitle, type RelocationInput } from './compare';
 import { classifyDates, proposeEventDate, hasConflictingEventDates } from './dates';
 import { extractStatedQuantities, narrativeFromChanges, reconcile } from './reconcile';
 import { applyQuantitySources, EMPTY_RESOLUTIONS, type Resolutions } from './resolve';
@@ -113,6 +113,8 @@ export async function analyseDocuments(args: AnalyseArgs): Promise<AnalysisOutpu
   const stated: StatedQuantity[] = [];
   const drawings: DrawingFile[] = [];
   const extracted: { name: string; text: string }[] = [];
+  const detailCompanions = new Map<string, string>();
+  const stemOf = (n: string) => n.replace(/\.[^.]+$/, '').toLowerCase();
   const documents: ExtractedDocument[] = [];
   const schedules: { fileName: string; model: ScheduleModel }[] = [];
   const runId = args.runId ?? 'run';
@@ -225,7 +227,23 @@ export async function analyseDocuments(args: AnalyseArgs): Promise<AnalysisOutpu
         if (out.kind === 'text' && out.ok && out.doc) {
           documents.push(out.doc);
           const txt = textOfDoc(out.doc);
-          stated.push(...extractStatedQuantities(txt, f.name, 'document_stated')); dates.push(...classifyDates(txt, { source: f.name, documentKind: 'other' }));
+          // A labelled typical detail may state component dimensions without any installed quantity.
+          // Check only its title block (not every occurrence of “typical detail” in notes).
+          const detail = out.doc.pages.length === 1 && out.doc.pages.some(({ text }) => {
+            const lines = text.split(/\r?\n/);
+            const label = /\bdrawing\s+title\b[ \t:]*/i;
+            for (const [i, line] of lines.entries()) {
+              if (!label.test(line)) continue;
+              const rows = [line.split(label)[1] ?? '', ...lines.slice(i + 1, i + 6)];
+              // Extractors can interleave an adjacent notes column immediately after the title.
+              const title = rows.slice(0, rows.findIndex((row) => /\btypical (?:details?|sections?|assembl(?:y|ies))\b/i.test(row)) + 1).join(' ') || rows.join(' ');
+              if (isDetailOnlyTitle(title)) return true;
+            }
+            return false;
+          });
+          if (detail) detailCompanions.set(stemOf(f.name), f.name);
+          else stated.push(...extractStatedQuantities(txt, f.name, 'document_stated'));
+          dates.push(...classifyDates(txt, { source: f.name, documentKind: 'other' }));
           extracted.push({ name: f.name, text: txt });
           unsupported.push({ fileName: f.name, reason: 'Flattened PDF/scan: text was read, but no scale or alignment is established, so no geometry is measured. Upload a DXF for measurement.' });
           readiness.push({ fileName: f.name, role: 'Drawing', state: 'unsupported', stateLabel: 'Not supported', detail: `Text read from ${out.doc.pages.length} page(s) (${out.doc.method}); not measurable as geometry. ${out.doc.limitation}`.trim() });
@@ -294,6 +312,10 @@ export async function analyseDocuments(args: AnalyseArgs): Promise<AnalysisOutpu
 
   // Pair, honouring the user's pairing/order answers, then validate and measure.
   emit('alignment', 'started', `Pairing ${drawings.length} drawing(s) and checking units and alignment`);
+  for (const d of drawings) {
+    const companion = detailCompanions.get(stemOf(d.fileName));
+    if (companion) d.detailOnlyEvidence = companion;
+  }
   const pairing = pairDrawings(drawings);
   const pairs: DrawingPair[] = [...pairing.pairs];
   for (const q of pairing.questions) {
@@ -323,8 +345,9 @@ export async function analyseDocuments(args: AnalyseArgs): Promise<AnalysisOutpu
     if (p.validated && p.originShift) questions.push({ id: `shift-${p.revised.fileName}`, kind: 'origin_shift', blocksComparison: false, title: 'The drawing origin moved between revisions', issue: `The revised drawing is the original translated by (${p.originShift.dx.toFixed(3)} m, ${p.originShift.dy.toFixed(3)} m): ${p.originShift.matched} of ${p.originShift.of} sampled elements coincide after the shift.`, evidence: [p.original.fileName, p.revised.fileName], proposal: 'The shift was applied before comparison so the whole drawing is not reported as changed.', options: [{ id: 'keep', label: 'Keep the shift correction' }] });
     if (!p.validated) {
       for (const b of p.blockers) {
-        const isUnit = /unit/i.test(b);
-        questions.push({ id: `val-${p.revised.fileName}-${questions.length}`, kind: isUnit ? 'unit' : 'scale', blocksComparison: true, title: isUnit ? 'Confirm the drawing units' : 'The drawings cannot be compared yet', issue: b, evidence: [p.original.fileName, p.revised.fileName], proposal: isUnit ? 'No measurement was taken. Confirm the units used in the CAD file, or export again with units set.' : 'Nothing was measured.', options: isUnit ? [{ id: 'm', label: 'Units are metres' }, { id: 'mm', label: 'Units are millimetres' }, { id: 'later', label: 'I will re-export the DXF' }] : [{ id: 'later', label: 'I will fix and re-upload' }] });
+        // An answer for one missing unit must never overwrite the partner drawing's independently declared unit.
+        const unknown = [p.original, p.revised].find((f) => f.metresPerUnit === null && b.startsWith(`${f.fileName}:`));
+        questions.push({ id: `val-${p.revised.fileName}-${questions.length}`, kind: unknown ? 'unit' : 'scale', blocksComparison: true, title: unknown ? `Confirm the units for ${unknown.fileName}` : 'The drawings cannot be compared yet', issue: b, evidence: unknown ? [unknown.fileName] : [p.original.fileName, p.revised.fileName], proposal: unknown ? 'No measurement was taken. Confirm this file’s model units, or export it again with units set.' : 'Nothing was measured. Review both files and confirm they describe the same comparable scope.', options: unknown ? [{ id: 'm', label: 'Units are metres' }, { id: 'cm', label: 'Units are centimetres' }, { id: 'mm', label: 'Units are millimetres' }, { id: 'later', label: 'I will re-export the DXF' }] : [{ id: 'later', label: 'I will fix and re-upload' }] });
       }
       continue;
     }

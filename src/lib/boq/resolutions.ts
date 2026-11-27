@@ -12,6 +12,8 @@ export type ExclusionScope = 'cost_only' | 'scenario';
 export interface ManualRate {
   /** Decimal text. "0" is an explicit zero and then `zeroBasis` is required; a blank value is never stored. */
   value: string;
+  /** Present only for explicit, case-scoped processed-PVR fallback. */
+  processedPvr?: { file: string; page: string; row: string; scopeKey: string };
   currency: string;
   /** Unit the rate is expressed per, e.g. m3. */
   unit: string;
@@ -29,6 +31,18 @@ export interface ManualRate {
   enteredAt: string;
   /** Always proposed. No approval workflow exists for this, so none is implied. */
   status: 'proposed';
+}
+
+export type RateScope = { id: string; name: string; action: string; location: string; specification: string };
+export const processedPvrScopeKey = (scope: RateScope) => JSON.stringify(
+  [scope.id, scope.name, scope.action, scope.location, scope.specification].map((s) => s.trim().toLowerCase()),
+);
+export function validProcessedPvrRate(rate: ManualRate, scope: RateScope, quantityUnit: string, caseCurrency: string): boolean {
+  const p = rate.processedPvr;
+  return !!p && !!p.file.trim() && /^\d+$/.test(p.page.trim()) && Number(p.page) > 0 && !!p.row.trim()
+    && !!quantityUnit.trim() && !!rate.unit.trim() && sameRateUnit(quantityUnit, rate.unit)
+    && rate.currency.trim().toUpperCase() === caseCurrency.trim().toUpperCase()
+    && p.scopeKey === processedPvrScopeKey(scope);
 }
 
 export type LineResolution =

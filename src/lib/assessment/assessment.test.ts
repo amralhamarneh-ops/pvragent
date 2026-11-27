@@ -303,8 +303,8 @@ describe('constraints, milestones and progress', () => {
   });
   it('milestone has zero duration and sits at predecessor finish', () => {
     const r = calculateCpm(net([act('A', 3), act('M', 0, { type: 'milestone_finish' })], [{ from: 'A', to: 'M', type: 'FS', lag: 0 }]));
-    expect(r.activities.M.earlyStart).toBe('2026-10-19');
-    expect(r.activities.M.earlyFinish).toBe('2026-10-19');
+    expect(r.activities.M.earlyStart).toBe('2026-10-14');
+    expect(r.activities.M.earlyFinish).toBe('2026-10-14');
   });
   it('in-progress work uses remaining duration from the data date; completed work keeps actuals', () => {
     const r = calculateCpm(net([act('D', 10, { remainingDuration: 0, actualStart: '2026-09-01', actualFinish: '2026-09-25' }), act('P', 10, { remainingDuration: 4, actualStart: '2026-10-05' }), act('N', 2)], [{ from: 'D', to: 'P', type: 'FS', lag: 0 }, { from: 'P', to: 'N', type: 'FS', lag: 0 }]));

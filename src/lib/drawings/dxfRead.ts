@@ -22,7 +22,18 @@ const apply = (m: Xf, p: Pt): Pt => ({ x: m.a * p.x + m.c * p.y + m.tx, y: m.b *
 const mul = (p: Xf, q: Xf): Xf => ({ a: p.a * q.a + p.c * q.b, b: p.b * q.a + p.d * q.b, c: p.a * q.c + p.c * q.d, d: p.b * q.c + p.d * q.d, tx: p.a * q.tx + p.c * q.ty + p.tx, ty: p.b * q.tx + p.d * q.ty + p.ty });
 /** Uniform scale magnitude of a transform, valid for similarity transforms (rotation + uniform scale + translation). */
 const detScale = (m: Xf) => Math.sqrt(Math.abs(m.a * m.d - m.b * m.c));
-const isUniform = (m: Xf) => Math.abs(Math.hypot(m.a, m.b) - Math.hypot(m.c, m.d)) < 1e-9 * Math.max(1, Math.hypot(m.a, m.b));
+// Equal column magnitudes alone are not sufficient: nested scaled rotations can produce shear.
+const isUniform = (m: Xf) => {
+  const u = Math.hypot(m.a, m.b); const v = Math.hypot(m.c, m.d);
+  return u > 0 && v > 0 && Math.abs(u - v) <= 1e-9 * Math.max(u, v)
+    && Math.abs(m.a * m.c + m.b * m.d) <= 1e-9 * u * v;
+};
+const nonPlanar = (e: Raw): boolean => {
+  const d = e.extrusionDirection as Raw | undefined;
+  return (num(d?.x ?? e.extrusionDirectionX) ?? 0) !== 0
+    || (num(d?.y ?? e.extrusionDirectionY) ?? 0) !== 0
+    || (num(d?.z ?? e.extrusionDirectionZ) ?? 1) !== 1;
+};
 const isMirrored = (m: Xf) => m.a * m.d - m.b * m.c < 0;
 
 /** Arc through two vertices with a DXF bulge (tan(sweep/4)). Positive bulge = counter-clockwise. */
@@ -80,10 +91,13 @@ function arcMid(s: Extract<PathSegment, { type: 'arc' }>): Pt {
 function transformSeg(s: PathSegment, m: Xf): PathSegment {
   if (s.type === 'line') { const a = apply(m, { x: s.x1, y: s.y1 }); let b = apply(m, { x: s.x2, y: s.y2 }); return { type: 'line', x1: a.x, y1: a.y, x2: b.x, y2: b.y }; }
   let c = apply(m, { x: s.cx, y: s.cy });
-  const rot = Math.atan2(m.b, m.a);
   let k = detScale(m);
   const mirrored = isMirrored(m);
-  return { type: 'arc', cx: c.x, cy: c.y, r: s.r * k, startAngle: mirrored ? Math.PI - s.startAngle + rot : s.startAngle + rot, endAngle: mirrored ? Math.PI - s.endAngle + rot : s.endAngle + rot, ccw: mirrored ? !s.ccw : s.ccw };
+  const angle = (a: number) => {
+    const x = Math.cos(a); const y = Math.sin(a);
+    return Math.atan2(m.b * x + m.d * y, m.a * x + m.c * y);
+  };
+  return { type: 'arc', cx: c.x, cy: c.y, r: s.r * k, startAngle: angle(s.startAngle), endAngle: angle(s.endAngle), ccw: mirrored ? !s.ccw : s.ccw };
 }
 
 function makeEntity(kind: string, layer: string, handle: string, segs: PathSegment[], vertices: Pt[], closed: boolean, extra: Partial<DrawingEntity> = {}): DrawingEntity {
@@ -97,6 +111,10 @@ function toEntities(e: Raw, m: Xf, fromBlock: string | undefined, skipped: Recor
   const kind = String(e.type ?? '');
   const layer = layerOverride ?? String(e.layer ?? '0');
   const handle = String(e.handle ?? '');
+  if (nonPlanar(e)) {
+    skipped['non-planar object coordinate system'] = (skipped['non-planar object coordinate system'] ?? 0) + 1;
+    return null;
+  }
   const extra: Partial<DrawingEntity> = fromBlock ? { fromBlock } : {};
   if (kind === 'LINE' || kind === 'LWPOLYLINE' || kind === 'POLYLINE') {
     const raw = Array.isArray(e.vertices) ? (e.vertices as Raw[]) : [];
@@ -110,6 +128,10 @@ function toEntities(e: Raw, m: Xf, fromBlock: string | undefined, skipped: Recor
       const a = pts[i]; let b = pts[(i + 1) % pts.length];
       const bulge = num((a as unknown as Raw).bulge) ?? 0;
       const local = bulgeSegment({ x: a.x, y: a.y }, { x: b.x, y: b.y }, bulge);
+      if (local.type === 'arc' && !isUniform(m)) {
+        skipped['POLYLINE bulge (non-uniform block scale → elliptical arc)'] = (skipped['POLYLINE bulge (non-uniform block scale → elliptical arc)'] ?? 0) + 1;
+        return null;
+      }
       segs.push(transformSeg(local, m));
     }
     return [makeEntity(kind, layer, handle, segs, world, closed, extra)];
@@ -144,6 +166,10 @@ type Blocks = Record<string, { entities?: Raw[]; position?: Pt }>;
  */
 function expandInsert(e: Raw, m: Xf, blocks: Blocks, depth: number, out: DrawingEntity[], skipped: Record<string, number>, counter: { n: number }): boolean {
   const name = String(e.name ?? '');
+  if (nonPlanar(e)) {
+    skipped['INSERT (non-planar object coordinate system)'] = (skipped['INSERT (non-planar object coordinate system)'] ?? 0) + 1;
+    return true;
+  }
   const def = blocks[name];
   const pos = isPt(e.position) ? e.position : null;
   if (!def || !Array.isArray(def.entities) || !pos) return false;
@@ -233,16 +259,24 @@ export async function readDxf(fileName: string, bytes: Uint8Array, onProgress?: 
   const rawEntities = Array.isArray(parsed.entities) ? (parsed.entities as Raw[]) : [];
   const entities: DrawingEntity[] = [];
   const texts: string[] = [];
+  const paperTitleTexts: string[] = [];
   const skipped: Record<string, number> = {};
   const counter = { n: 0 };
+  let excludedPaper = 0;
   for (const e of rawEntities) {
+    if (e.inPaperSpace === true) {
+      excludedPaper += 1;
+      const t = ['TEXT', 'MTEXT', 'ATTRIB', 'ATTDEF'].includes(String(e.type)) ? textOf(e) : '';
+      if (/\b(?:dwg|drawing|drg|sheet)\s*(?:title|no\.?|number)|\brev(?:ision)?\s*[:=]/i.test(t)) paperTitleTexts.push(t);
+      continue;
+    }
     if (e.type === 'TEXT' || e.type === 'MTEXT' || e.type === 'ATTRIB' || e.type === 'ATTDEF') { const t = textOf(e); if (t.trim()) texts.push(t); continue; }
     if (e.type === 'INSERT') {
       const before = entities.length;
       const ok = expandInsert(e, IDENTITY, blocks, 0, entities, skipped, counter);
       const p = e.position;
       // Always keep one countable INSERT marker so block counts (nr) remain exact even when the block has geometry.
-      if (isPt(p)) entities.push({ kind: 'INSERT', layer: String(e.layer ?? '0'), handle: String(e.handle ?? ''), vertices: [{ x: p.x, y: p.y }], closed: false, length: 0, area: 0, blockName: String(e.name ?? '') });
+      if (isPt(p) && !nonPlanar(e)) entities.push({ kind: 'INSERT', layer: String(e.layer ?? '0'), handle: String(e.handle ?? ''), vertices: [{ x: p.x, y: p.y }], closed: false, length: 0, area: 0, blockName: String(e.name ?? '') });
       if (!ok) skipped[`INSERT of undefined block "${String(e.name ?? '')}" (counted, no geometry)`] = (skipped[`INSERT of undefined block "${String(e.name ?? '')}" (counted, no geometry)`] ?? 0) + 1;
       void before;
       continue;
@@ -303,14 +337,16 @@ export async function readDxf(fileName: string, bytes: Uint8Array, onProgress?: 
   // Unsupported-but-geometric entity types are a coverage limit, not just a note.
   const GEOMETRIC_UNSUPPORTED = ['SPLINE', 'ELLIPSE', 'HATCH', 'SOLID', '3DFACE', 'MESH', 'DIMENSION', 'LEADER', 'REGION', '3DSOLID', 'BODY', 'IMAGE', 'WIPEOUT'];
   const unsupportedGeometry = Object.entries(skipped).filter(([k]) => GEOMETRIC_UNSUPPORTED.some((g) => k.startsWith(g)));
-  const coverageLimited = unresolvedXrefs.length > 0 || unsupportedGeometry.length > 0;
+  const unsupportedTransform = Object.keys(skipped).some((k) => /non-uniform block scale|non-planar object coordinate system/.test(k));
+  const coverageLimited = unresolvedXrefs.length > 0 || unsupportedGeometry.length > 0 || unsupportedTransform;
+  if (excludedPaper) issues.push(`${excludedPaper} paper-space entity(ies) excluded from model-space geometry and quantity checks.`);
   if (unsupportedGeometry.length) issues.push(`Coverage is limited: ${unsupportedGeometry.map(([k, v]) => `${v} × ${k}`).join(', ')} could not be measured, so quantities from layers containing them may be understated.`);
   if (entities.some((e) => e.curved)) issues.push(`${entities.filter((e) => e.curved).length} curved entity(ies) (arcs, circles, polyline bulges) are measured with their true arc geometry, not as straight chords.`);
 
   const pts = entities.flatMap((e) => (e.segments?.length ? curveExtentPoints(e.segments) : e.vertices));
   const extents = boundsOf(pts);
   const layers = Array.from(new Set(entities.map((e) => e.layer))).sort();
-  const titleBlock = extractTitleBlock(fileName, texts);
+  const titleBlock = extractTitleBlock(fileName, [...paperTitleTexts, ...texts]);
   onProgress?.('geometry', { count: entities.length, total: entities.length, detail: `${entities.length} entities on ${layers.length} layer(s) available for drawing` });
 
   const state = entities.length > 0 ? 'read' : 'failed';
