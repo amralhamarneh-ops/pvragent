@@ -127,7 +127,8 @@ export default function BrowserDemo() {
     <div>
       <Link href="/new-pvr" className="text-sm underline">Back to New PVR</Link>
       <h1 className="mt-2 text-3xl font-semibold">PVR rehearsal: drawings, BOQ &amp; programme</h1>
-      <p className="mt-1 text-muted-foreground">Browser-only demo. Use synthetic files only. The latest rehearsal is saved in this browser profile, not on the server. No cost or approvals. The schedule section shows a simulated impact, not an approved programme.</p>
+      <p className="mt-1 text-muted-foreground">Browser-only demo. Use synthetic files for drawing and BOQ rehearsal. The latest rehearsal is saved in this browser profile, not on the server. No cost or approvals. The schedule section shows simulated results, not an approved programme.</p>
+      {!run && <a href="#programme-rehearsal" className="mt-2 inline-block text-sm font-semibold underline">Programme &amp; time impact</a>}
     </div>
     <div className="flex flex-wrap items-center gap-3 rounded-lg border border-border bg-card p-3">
       <button type="button" disabled={busy} onClick={()=>void completeSample()} className="rounded bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground disabled:opacity-50">Run complete civil sample</button>
@@ -194,7 +195,6 @@ export default function BrowserDemo() {
           })}</tbody>
         </table></div>
       </section>
-      <div id="programme-rehearsal" className="scroll-mt-20"><RehearsalSchedulePanel key={run.savedAt} schedule={run.schedule} busy={busy} onCalculate={(a,b,c)=>void addSchedule(a,b,c)}/></div>
       <section className="rounded-lg border border-border bg-card p-4" aria-label="Saved processing steps">
         <h2 className="text-xl font-semibold">Saved processing steps</h2>
         <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm">{run.events.map(event=><li key={event.step}><strong>{event.step}</strong>: {event.detail}</li>)}</ol>
@@ -206,5 +206,6 @@ export default function BrowserDemo() {
         </details>
       </section>
     </div> : null}
+    <div id="programme-rehearsal" className="scroll-mt-20"><RehearsalSchedulePanel schedule={run?.schedule} busy={busy} hasRehearsal={!!run} onCalculate={(a,b,c)=>void addSchedule(a,b,c)}/></div>
   </main>;
 }

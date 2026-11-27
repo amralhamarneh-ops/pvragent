@@ -2,6 +2,7 @@
 
 import React, { useState } from 'react';
 import { dayDiff } from '@/lib/assessment/cpmEngine';
+import FragmentReplayPanel from './FragmentReplayPanel';
 import type { RehearsalSchedule } from '@/lib/demo/scheduleRehearsal';
 
 const fmt = (s:string) => /^\d{4}-\d{2}-\d{2}$/.test(s) && Number.isFinite(Date.parse(s)) ? new Intl.DateTimeFormat('en-GB',{day:'numeric',month:'short',year:'numeric',timeZone:'UTC'}).format(new Date(s+'T00:00:00Z')) : '—';
@@ -45,9 +46,10 @@ function Timeline({ rows }: { rows:Row[] }) {
   </div>;
 }
 
-export default function RehearsalSchedulePanel({ schedule, busy, onCalculate }: {
+export default function RehearsalSchedulePanel({ schedule, busy, hasRehearsal, onCalculate }: {
   schedule?: RehearsalSchedule;
   busy:boolean;
+  hasRehearsal:boolean;
   onCalculate:(baseline:File, productivity:File, benchmark?:File)=>void;
 }) {
   const [files,setFiles]=useState<{baseline?:File;productivity?:File;benchmark?:File}>({});
@@ -98,13 +100,14 @@ export default function RehearsalSchedulePanel({ schedule, busy, onCalculate }: 
         </div>
         <p className="text-xs text-muted-foreground">Day-level CPM simulation, not a Primavera run, an approved programme or an extension-of-time decision. Resource levelling is not applied. The source XER is never edited.</p>
       </>}
-    <details className="rounded border border-border p-3 text-sm">
+    {hasRehearsal && <details className="rounded border border-border p-3 text-sm">
       <summary className="cursor-pointer font-semibold">Calculate using your own synthetic XER and productivity CSV</summary>
       <p className="mt-2 text-muted-foreground">Use a small single-project XER. CSV columns: Item, Unit, Quantity per working day, Source. For coordinate-only drawing locations, link each BOQ item to its P6 execution activity with a BOQ Item activity code.</p>
       <form className="mt-2 flex flex-wrap items-end gap-3" onSubmit={e=>{e.preventDefault(); if(files.baseline&&files.productivity)onCalculate(files.baseline,files.productivity,files.benchmark);}}>
         {fields.map(([id,label,accept])=><label key={id} className="grid gap-1 text-xs font-medium">{label}<input type="file" required={id!=='benchmark'} accept={accept} disabled={busy} onChange={e=>setFiles(prev=>({...prev,[id]:e.target.files?.[0]}))}/></label>)}
         <button type="submit" disabled={busy||!files.baseline||!files.productivity} className="rounded bg-primary px-3 py-2 font-semibold text-primary-foreground disabled:opacity-50">Calculate and save time impact</button>
       </form>
-    </details>
+    </details>}
+    <FragmentReplayPanel />
   </section>;
 }
