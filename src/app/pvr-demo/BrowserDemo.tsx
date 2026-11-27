@@ -3,6 +3,9 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { REPLAY_SPEEDS, replayDelay, type ReplaySpeed } from '@/lib/drawings/replay';
+import { completeCivilSample } from '@/lib/demo/scheduleSample';
+import { calculateRehearsalSchedule, type RehearsalSchedule } from '@/lib/demo/scheduleRehearsal';
+import RehearsalSchedulePanel from './RehearsalSchedulePanel';
 import DrawingChangeSheets from './DrawingChangeSheets';
 import SavedDrawingReplay from '@/app/case-workspace/components/SavedDrawingReplay';
 import { DEMO_KEY, REHEARSAL_LIMIT, loadBrowserRehearsal, runBrowserRehearsal, type BrowserRehearsal } from '@/lib/demo/browserRehearsal';
@@ -64,6 +67,41 @@ export default function BrowserDemo() {
       }
     } catch (err) { setError(err instanceof Error ? err.message : 'Could not open the rehearsal file.'); }
   };
+  const saveSchedule = (original: BrowserRehearsal, schedule: RehearsalSchedule) => {
+    const next = {...original, schedule};
+    const raw = JSON.stringify(next);
+    if (!loadBrowserRehearsal(raw)) throw new Error('This rehearsal exceeds the save limit or has invalid schedule evidence.');
+    setRun(next);
+    try {
+      localStorage.setItem(DEMO_KEY,raw);
+      setStatus(schedule.after?'Saved drawing changes, BOQ matches and time impact in this browser.':'Saved the rehearsal with schedule checks requiring review.');
+    } catch {
+      setStatus('The complete rehearsal is shown below. Download the backup to preserve it; this browser did not save it.');
+    }
+  };
+  const completeSample = async () => {
+    if (busy) return;
+    setBusy(true);setError('');setStatus('Reading the civil sample files…');
+    try {
+      const f=completeCivilSample();
+      const result=await runBrowserRehearsal(f.original,f.revised,f.boq,f.referenceName,setStatus);
+      setStatus('Reading the XER and calculating the scenario…');
+      saveSchedule(result,await calculateRehearsalSchedule(result,f.schedule,true));
+    } catch(err) {setError(err instanceof Error ? err.message : 'Could not run the complete rehearsal.');setStatus('');}
+    finally {setBusy(false);}
+  };
+  const addSchedule = async (baseline:File, productivity:File, benchmark?:File) => {
+    if (!run || busy) return;
+    setBusy(true);setError('');setStatus('Reading the XER and calculating the scenario…');
+    try {
+      if (baseline.size>2_000_000 || (benchmark?.size??0)>2_000_000 || productivity.size>50_000)
+        throw new Error('Use XERs up to 2 MB each and a productivity CSV up to 50 KB.');
+      const input=async (f:File) => ({name:f.name,bytes:new Uint8Array(await f.arrayBuffer())});
+      const [a,b,c]=await Promise.all([input(baseline),input(productivity),benchmark?input(benchmark):undefined]);
+      saveSchedule(run,await calculateRehearsalSchedule(run,{baseline:a,productivity:b,benchmark:c}));
+    } catch(err) {setError(err instanceof Error ? err.message : 'Could not assess the programme.');setStatus('');}
+    finally {setBusy(false);}
+  };
   const start = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const {original,revised,boq,reference} = files;
@@ -88,8 +126,12 @@ export default function BrowserDemo() {
   return <main className="mx-auto max-w-6xl space-y-5 p-4 lg:p-8">
     <div>
       <Link href="/new-pvr" className="text-sm underline">Back to New PVR</Link>
-      <h1 className="mt-2 text-3xl font-semibold">PVR rehearsal: drawings &amp; BOQ</h1>
-      <p className="mt-1 text-muted-foreground">Browser-only demo. Use synthetic files only. The latest rehearsal is saved in this browser profile, not on the server. No cost, schedule impact or approvals.</p>
+      <h1 className="mt-2 text-3xl font-semibold">PVR rehearsal: drawings, BOQ &amp; programme</h1>
+      <p className="mt-1 text-muted-foreground">Browser-only demo. Use synthetic files only. The latest rehearsal is saved in this browser profile, not on the server. No cost or approvals. The schedule section shows a simulated impact, not an approved programme.</p>
+    </div>
+    <div className="flex flex-wrap items-center gap-3 rounded-lg border border-border bg-card p-3">
+      <button type="button" disabled={busy} onClick={()=>void completeSample()} className="rounded bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground disabled:opacity-50">Run complete civil sample</button>
+      <p className="text-sm text-muted-foreground">Drawing revisions → BOQ → P6 activities → time impact. Running the sample replaces the saved rehearsal in this browser.</p>
     </div>
     <details className="rounded-lg border border-border bg-card p-4" open={run ? undefined : true}>
       <summary className="cursor-pointer font-semibold">Run a new rehearsal</summary>
@@ -112,9 +154,12 @@ export default function BrowserDemo() {
     {status ? <p role="status" className="text-sm font-medium">{status}</p> : null}
     {error ? <p role="alert" className="rounded border border-destructive/40 p-3 text-sm text-destructive">{error}{run ? ' The result shown below is from the latest completed run.' : ''}</p> : null}
     {run ? <div className="space-y-5">
-      <DrawingChangeSheets key={run.savedAt} model={run.replay.models[0]} changes={run.changes} />
-      <SavedDrawingReplay key={`replay-${run.savedAt}`} replay={run.replay} changes={run.changes} />
-      <section className="rounded-lg border border-border bg-card p-4" aria-label="Measured quantities and BOQ mapping">
+      <nav aria-label="Rehearsal steps" className="flex flex-wrap gap-3 text-sm font-semibold"><a href="#drawing-rehearsal" className="underline">Drawings &amp; replay</a><a href="#boq-rehearsal" className="underline">BOQ matches</a><a href="#programme-rehearsal" className="underline">Programme &amp; time impact</a></nav>
+      <div id="drawing-rehearsal" className="scroll-mt-20 space-y-4">
+        <DrawingChangeSheets key={run.savedAt} model={run.replay.models[0]} changes={run.changes} />
+        <SavedDrawingReplay key={`replay-${run.savedAt}`} replay={run.replay} changes={run.changes} />
+      </div>
+      <section id="boq-rehearsal" className="scroll-mt-20 rounded-lg border border-border bg-card p-4" aria-label="Measured quantities and BOQ mapping">
         <h2 className="text-xl font-semibold">Measured quantities and BOQ mapping</h2>
         <p className="text-sm text-muted-foreground">{run.boqRows} BOQ item(s) read. Mappings are proposals, not approvals. Quantities come from the drawing comparison only.</p>
         <div className="mt-3 flex flex-wrap items-center gap-2" aria-label="BOQ mapping replay controls">
@@ -149,9 +194,11 @@ export default function BrowserDemo() {
           })}</tbody>
         </table></div>
       </section>
+      <div id="programme-rehearsal" className="scroll-mt-20"><RehearsalSchedulePanel key={run.savedAt} schedule={run.schedule} busy={busy} onCalculate={(a,b,c)=>void addSchedule(a,b,c)}/></div>
       <section className="rounded-lg border border-border bg-card p-4" aria-label="Saved processing steps">
         <h2 className="text-xl font-semibold">Saved processing steps</h2>
         <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm">{run.events.map(event=><li key={event.step}><strong>{event.step}</strong>: {event.detail}</li>)}</ol>
+        {run.schedule ? <p className="mt-2 text-sm">Schedule steps saved: read pre-change XER, check baseline reproduction, map execution activities, apply stated crew outputs and {run.schedule.after ? 'recalculate the network' : 'hold the simulation for review'}.</p> : null}
         <h3 className="mt-3 font-semibold">Input files</h3>
         <ul className="text-sm">{run.sources.map(s=><li key={s.role} title={s.sha256}>{s.role}: {s.name}</li>)}</ul>
         <details className="mt-3 text-sm"><summary className="cursor-pointer underline">Drawing reader checks</summary>
