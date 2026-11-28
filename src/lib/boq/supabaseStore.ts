@@ -172,22 +172,27 @@ export const GUEST_USER_ID = '00000000-0000-0000-0000-000000000001';
 
 /**
  * Sign-in is currently not required. When no session is sent, the request acts as the shared guest user
- * through the anon role. If a valid Bearer session is sent it is still honoured.
+ * through the anon role. A supplied user session must verify; an expired session must never redirect
+ * a private workspace read or write into the shared guest workspace.
  */
 export async function verifyUser(authHeader: string | null, url: string | undefined, anonKey: string | undefined): Promise<VerifiedUser> {
   if (!url || !anonKey) throw new StorageUnavailableError('not_configured', 'NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY is not set on the server.', { code: 'not_configured', operation: 'verifyUser', resource: 'environment', httpStatus: null, dbCode: '', message: 'Supabase URL or key not set.', details: '', hint: '' });
-  const m = /^Bearer\s+(.+)$/i.exec(authHeader ?? '');
-  const token = m ? m[1].trim() : '';
-  if (!token || token === anonKey) return { id: GUEST_USER_ID, email: 'guest@local', token: anonKey };
+  const m = /^Bearer\s+(\S+)$/i.exec(authHeader?.trim() ?? '');
+  const token = m?.[1];
+  if (authHeader == null || token === anonKey) return { id: GUEST_USER_ID, email: 'guest@local', token: anonKey };
+  const invalid = () => new AccessDeniedError(401, 'Your sign-in session is invalid or expired. Sign in again to access your private PVR.');
+  if (!token) throw invalid();
   let res: Response;
   try {
-    res = await fetch(`${url.replace(/\/$/, '')}/auth/v1/user`, { headers: { apikey: anonKey, Authorization: `Bearer ${token}` }, cache: 'no-store' });
+    res = await fetch(`${url.replace(/\/$/, '')}/auth/v1/user`, { headers: { apikey: anonKey, Authorization: `Bearer ${token}` }, cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(8_000) });
   } catch {
-    return { id: GUEST_USER_ID, email: 'guest@local', token: anonKey };
+    throw new StorageUnavailableError('network', 'Cannot reach Supabase to verify your sign-in session. No private changes were saved.');
   }
-  if (!res.ok) return { id: GUEST_USER_ID, email: 'guest@local', token: anonKey };
-  const u = (await res.json()) as { id?: string; email?: string };
-  if (!u.id) return { id: GUEST_USER_ID, email: 'guest@local', token: anonKey };
+  if ([400, 401, 403].includes(res.status)) throw invalid();
+  const unavailable = () => new StorageUnavailableError('rejected', 'Supabase could not verify your sign-in session. No private changes were saved.');
+  if (!res.ok) throw unavailable();
+  const u = (await res.json().catch(() => null)) as { id?: string; email?: string } | null;
+  if (typeof u?.id !== 'string' || !u.id || u.id === GUEST_USER_ID) throw unavailable();
   return { id: u.id, email: u.email ?? '', token };
 }
 
