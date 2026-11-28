@@ -11,6 +11,11 @@ describe('server processor executable',()=>{
     await expect(runFile(process.execPath,['-e','process.stderr.write("convert failed");process.exit(7)'],{timeout:2000}))
       .rejects.toMatchObject({code:7,stderr:'convert failed'});
   });
+  it('preserves raw binary output for the PDF rasterizer', async () => {
+    const output = await runFile(process.execPath, ['-e', 'process.stdout.write(Buffer.from([137,80,78,71,0,255]))'], { encoding: 'buffer', timeout: 2000, maxBuffer: 1024 });
+    expect(output.stdout).toEqual(Buffer.from([137,80,78,71,0,255]));
+    expect(output.stderr).toEqual(Buffer.alloc(0));
+  });
   it('settles on timeout',async()=>{
     await expect(runFile(process.execPath,['-e','setInterval(()=>{},100)'],{timeout:150})).rejects.toMatchObject({killed:true});
   });

@@ -167,10 +167,8 @@ export async function cacheGet(key: string): Promise<Uint8Array | null> {
 
 export const cacheKey = (sha256: string) => `sha:${sha256}`;
 
-/** Maximum size of one accepted document. */
-const MAX_DOC_BYTES = 25 * 1024 * 1024;
-
-export { DOC_STATE_LABEL, MAX_DOC_BYTES, DocumentRegistry };
+export { MAX_DOC_BYTES } from '../intake/uploadLimits';
+export { DOC_STATE_LABEL, DocumentRegistry };
 function DocRecord(...args: any[]): any {
   // eslint-disable-next-line no-console
   console.warn('Placeholder: DocRecord is not implemented yet.', args);

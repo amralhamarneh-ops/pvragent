@@ -1,26 +1,26 @@
-interface RunResult { stdout: string; stderr: string }
-type RunFile = (file: string, args?: readonly string[], options?: { timeout?: number; maxBuffer?: number; cwd?: string; env?: NodeJS.ProcessEnv; encoding?: BufferEncoding }) => Promise<RunResult>;
-
-type ExecFileCb = (err: Error | null, stdout: string, stderr: string) => void;
-type ExecFileFn = (file: string, args: string[], options: Record<string, unknown>, cb: ExecFileCb) => unknown;
+interface RunResult<T extends string | Buffer> { stdout: T; stderr: T }
+type RunOptions = { timeout?: number; maxBuffer?: number; cwd?: string; env?: NodeJS.ProcessEnv };
+type ExecFileFn = (file: string, args: string[], options: Record<string, unknown>, cb: (error: Error | null, stdout: string | Buffer, stderr: string | Buffer) => void) => unknown;
 
 let cached: ExecFileFn | null = null;
 
 async function loadExecFile(): Promise<ExecFileFn> {
   if (cached) return cached;
-  // Resolved by Node at runtime (not bundled): the specifier is built dynamically and webpack is told to skip it.
+  // Resolve the built-in at call time; preview bundlers need not rewrite or evaluate a top-level native binding.
   const name = ['node:child', 'process'].join('_');
   const mod = (await import(/* webpackIgnore: true */ name)) as { execFile: ExecFileFn };
   cached = mod.execFile;
   return cached;
 }
 
-export const runFile: RunFile = async (file, args = [], options = {}) => {
+export function runFile(file: string, args: readonly string[], options: RunOptions & { encoding: 'buffer' }): Promise<RunResult<Buffer>>;
+export function runFile(file: string, args?: readonly string[], options?: RunOptions & { encoding?: BufferEncoding }): Promise<RunResult<string>>;
+export async function runFile(file: string, args: readonly string[] = [], options: RunOptions & { encoding?: BufferEncoding | 'buffer' } = {}) {
   const execFile = await loadExecFile();
-  return new Promise<RunResult>((resolve, reject) => {
+  return new Promise<RunResult<string | Buffer>>((resolve, reject) => {
     execFile(file, [...args], { ...options, shell: false, windowsHide: true }, (error, stdout, stderr) => {
       if (error) { reject(Object.assign(error, { stdout, stderr })); return; }
       resolve({ stdout, stderr });
     });
   });
-};
+}

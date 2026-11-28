@@ -87,14 +87,21 @@ export async function extractPdf(bytes, { signal, onProgress } = {}) {
     try {
       const page = await doc.getPage(p);
       const tc = await page.getTextContent();
-      const text = tc.items.map((it) => ('str' in it ? it.str + (it.hasEOL ? '\n' : ' ') : '')).join('').replace(/[ \t]+/g, ' ').trim();
+      const nativeText = tc.items.map((it) => ('str' in it ? it.str + (it.hasEOL ? '\n' : ' ') : '')).join('').replace(/[ \t]+/g, ' ').trim();
+      const annotations = await page.getAnnotations({ intent: 'display' }).catch(() => []);
+      const notes = [...new Set(annotations
+        .filter((a) => ['FreeText', 'Text', 'Polygon', 'PolyLine', 'Line', 'Square', 'Circle', 'Ink', 'Highlight'].includes(a.subtype))
+        .map((a) => typeof a.contentsObj?.str === 'string' ? a.contentsObj.str.trim().slice(0, 500) : '')
+        .filter((a) => a && !nativeText.includes(a)))].slice(0, 100);
+      // A markup note is not drawn geometry and never substitutes for the scan's underlying text.
+      const text = [nativeText, notes.length ? '[PDF annotations; review against the sheet]\n' + notes.join('\n') : ''].filter(Boolean).join('\n');
       let rasterBody = false;
-      if (text.length >= MIN_TEXT && text.length < 120) {
+      if (nativeText.length >= MIN_TEXT && nativeText.length < 120) {
         const ops = await page.getOperatorList().catch(() => null);
         if (ops) rasterBody = ops.fnArray.some((op, i) =>
           op === pdfjs.OPS.paintImageXObject && Number(ops.argsArray[i]?.[1]) >= 512 && Number(ops.argsArray[i]?.[2]) >= 384);
       }
-      if (text.length >= MIN_TEXT && !rasterBody) units.push({ index: p, label: `Page ${p}`, text, method: 'text', status: 'read' });
+      if (nativeText.length >= MIN_TEXT && !rasterBody) units.push({ index: p, label: `Page ${p}`, text, method: 'text', status: 'read' });
       else { units.push({ index: p, label: `Page ${p}`, text, method: text ? 'text' : 'none', status: 'skipped', reason: rasterBody ? 'Short native text with a raster image; page OCR needed.' : 'No substantial text layer (scanned/image page).' }); needOcr.push(p); }
     } catch (e) { units.push({ index: p, label: `Page ${p}`, text: '', method: 'none', status: 'failed', reason: `Page could not be read: ${e?.message ?? e}` }); }
     onProgress?.({ done: p, total: limit, detail: `PDF text: page ${p} of ${limit}` });
