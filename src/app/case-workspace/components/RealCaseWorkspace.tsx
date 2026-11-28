@@ -344,10 +344,19 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
   const activeSchedule = inputSchedules[schedIdx] ?? null;
   const drawingsAreCurrent = useCallback(async () => !!handoff && matchesCurrentDrawings(handoff.documents, await loadDrawingManifest(caseId)), [caseId,handoff]);
   const drawingScope = useMemo(() => drawingProgrammeScope(handoff,loaded?.case?.currency??'AED'),[handoff,loaded?.case?.currency]);
+  // Drawings keep the same scheduling identity when a BOQ match is subsequently confirmed.
+  const drawingLineId=new Map(drawingScope.lines.map(l=>[l.componentId,l.lineId]));
+  const costLineId=new Map<string,string>();
   const programmeLines = agentRun
-    ? [...sharedLines,...drawingScope.lines.filter(line=>line.componentId.startsWith('pending-drawing:')&&
+    ? [...sharedLines.map(l=>{
+       const id=l.origin==='new_item'?l.lineId:drawingLineId.get(l.componentId)??l.lineId;
+       costLineId.set(id,l.lineId);
+       return id===l.lineId?l:{...l,lineId:id,work:{...l.work,lineId:id}};
+      }),...drawingScope.lines.filter(line=>line.componentId.startsWith('pending-drawing:')&&
        !sharedLines.some(l=>l.name===line.name&&l.work.executes&&!l.work.quantity))]
     : drawingScope.lines;
+  const programmeChoice=(id:string)=>mapChoices[id]??mapChoices[costLineId.get(id)??id];
+  const programmeExclusion=(id:string)=>schedExcl[id]??schedExcl[costLineId.get(id)??id];
   const programmeScope = useMemo<ProgrammeScopeLine[]>(() => {
     const eligible=new Map(activeSchedule?.model.activities.filter(a=>a.kind==='task' && !a.actualFinish).map(a=>[a.taskId??a.id,a]));
     const source=new Map([...drawingScope.components,...(agentRun?.scope.components??[])].map(c=>[c.id,c]));
@@ -355,7 +364,7 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
     return programmeLines.filter(l=>l.work.executes).map(l=>{
       const component=source.get(l.componentId);
       const q=l.origin!=='new_item'&&component?.quantity?.origin==='measured_from_geometry'?component.quantity:null;
-      const choice=mapChoices[l.lineId];
+      const choice=programmeChoice(l.lineId);
       const ids=choice?.activityTaskIds??[];
       const activityCodes=mappingProgrammeHash===activeSchedule?.sha256&&!choice?.state&&ids.every(id=>{const a=eligible.get(id);return !!a&&!cannotAssignProgrammeWork(l.work,a);})
         ? ids.map(id=>eligible.get(id)!.id) : [];
@@ -368,7 +377,7 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
         boqSource:l.origin==='boq'&&!l.source.startsWith('Processed PVR')?l.source:'',
         activityCodes,newCode,split:Object.fromEntries(ids.flatMap(id=>{const a=eligible.get(id),s=choice?.shares?.[id];return a&&s?[[a.id,s]]:[];})),blocker:agentStale||agentRunning?'Verify the current source and rerun the drawing assessment.'
           : l.heldForOverlap?'Resolve overlapping scope before assigning a duration.'
-          : schedExcl[l.lineId]||choice?.state?'This line is held or excluded in activity mapping.'
+          : programmeExclusion(l.lineId)||choice?.state?'This line is held or excluded in activity mapping.'
           : component?.action!=='add'?'Omission, replacement and rework need a separate reviewed time basis; added hours cannot be assumed.':undefined};
     });
   },[activeSchedule,agentRun,agentStale,agentRunning,drawingScope,programmeLines,mapChoices,mappingProgrammeHash,schedExcl]);
@@ -649,6 +658,7 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
     const fallback=!!manual?.processedPvr;
     const sources=calc?.sources.map(s=>[s.file,[s.sheet,s.rateCell].filter(Boolean).join('!')].filter(Boolean).join(' · ')).join('; ');
     const trusted=!!q && !!(calc||fallback);
+    const mapping=programmeChoice(l.origin==='new_item'?l.lineId:drawingLineId.get(l.componentId)??l.lineId);
     return [{
       ...t, disposition:t.disposition==='priced'&&!trusted?'unpriced':t.disposition,
       signedAmount:trusted?t.signedAmount:null, description:l.name, quantity:q?.value??null, quantityUnit:q?.unit??l.work.unit, quantityAction:component?.action,
@@ -656,8 +666,8 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
       rate:fallback ? manual!.value : calc?.rate??null, rateUnit:fallback ? manual!.unit : calc?.boqUnit??'',
       rateSource:fallback ? 'Processed PVR rate (BOQ unavailable): '+l.source : sources ? 'Contract BOQ: '+sources : 'No verified BOQ or cited fallback rate',
       rateFallback:fallback,
-      mappedActivity:mappingProgrammeHash === activeSchedule?.sha256 && !mapChoices[l.lineId]?.state
-        ? (mapChoices[l.lineId]?.activityTaskIds??[]).map(id=>activeSchedule?.model.activities.find(a=>(a.taskId??a.id)===id)?.id).filter(Boolean).join(', ') : undefined,
+      mappedActivity:mappingProgrammeHash === activeSchedule?.sha256 && !mapping?.state
+        ? (mapping?.activityTaskIds??[]).map(id=>activeSchedule?.model.activities.find(a=>(a.taskId??a.id)===id)?.id).filter(Boolean).join(', ') : undefined,
     } satisfies FormLine];
   });
   const whatIf=programmeWhatIf && activeSchedule?.sha256===programmeWhatIf.sourceSha256 ? programmeWhatIf : null;
@@ -681,17 +691,17 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
                   model={activeSchedule?.model ?? null}
                   scheduleFileName={activeSchedule?.fileName ?? ''}
                   lines={programmeLines}
-                  choices={mappingProgrammeHash === activeSchedule?.sha256 ? mapChoices : {}}
+                  choices={mappingProgrammeHash === activeSchedule?.sha256 ? Object.fromEntries(programmeLines.flatMap(l=>{const c=programmeChoice(l.lineId);return c?[[l.lineId,c]]:[];})) : {}}
                   onChoices={(c) => { setMappingProgrammeHash(activeSchedule?.sha256 ?? ''); setMapChoices(c); setAssessmentConfirmed(false); }}
-                  scheduleExclusions={schedExcl}
+                  scheduleExclusions={Object.fromEntries(programmeLines.flatMap(l=>{const e=programmeExclusion(l.lineId);return e?[[l.lineId,e]]:[];}))}
                   onScheduleExclusion={(id, ex) => {
-                    setSchedExcl((cur) => { const n = { ...cur }; if (ex) n[id] = ex; else delete n[id]; return n; });
-                    if (ex?.kind === 'scenario' || (!ex && schedExcl[id]?.kind === 'scenario')) setResState((cur) => { const s = { ...cur, scheduleStale: true, costStale: true, updatedAt: new Date().toISOString() }; writeResolutionState(caseId, s); return s; });
+                    setSchedExcl((cur) => { const n = { ...cur }; const alias=costLineId.get(id);if(alias&&alias!==id)delete n[alias]; if (ex) n[id] = ex; else delete n[id]; return n; });
+                    if (ex?.kind === 'scenario' || (!ex && programmeExclusion(id)?.kind === 'scenario')) setResState((cur) => { const s = { ...cur, scheduleStale: true, costStale: true, updatedAt: new Date().toISOString() }; writeResolutionState(caseId, s); return s; });
                   }}
-                  onManualRate={selectedImport&&agentRun?(id) => setPanelManual(id):undefined}
-                  onCreateItem={selectedImport&&agentRun?openCreateItem:undefined}
-                  onExcludeCost={selectedImport&&agentRun?(id) => setPanelExclude(id):undefined}
-                  onDeferCost={selectedImport&&agentRun?(id) => setPanelDefer(id):undefined}
+                  onManualRate={selectedImport&&agentRun?(id) => setPanelManual(costLineId.get(id)??id):undefined}
+                  onCreateItem={selectedImport&&agentRun?(id)=>openCreateItem(costLineId.get(id)??id):undefined}
+                  onExcludeCost={selectedImport&&agentRun?(id) => setPanelExclude(costLineId.get(id)??id):undefined}
+                  onDeferCost={selectedImport&&agentRun?(id) => setPanelDefer(costLineId.get(id)??id):undefined}
                   partialAccepted={partialAccepted}
                   onContinuePartial={() => setPartialAccepted(true)}
                   running={schedLoading}
@@ -734,7 +744,8 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
                   <select id="sched-pick" value={schedIdx} onChange={(e) => setSchedIdx(Number(e.target.value))} className="rounded-md border border-input bg-card px-2 py-1 text-foreground">{inputSchedules.map((s, i) => <option key={s.docId} value={i}>{s.fileName}{s.subrole ? ` (${s.subrole})` : ''}</option>)}</select></div>
               ) : null}
           {schedLoad && schedLoad.problems.length > 0 ? <ul role="status" className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-foreground">{schedLoad.problems.map((pr) => <li key={pr.fileName}><span className="font-medium">{pr.fileName}</span>: {pr.reason}</li>)}</ul> : null}
-          {!selectedImport && <>{programmeMapping}{programmePanel}</>}
+          {programmeMapping}
+          {programmePanel}
 
       {!selectedImport ? (
         <div className="rounded-lg border border-warning/40 bg-warning/10 p-5">
@@ -909,8 +920,6 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
             </section>
           ) : null}
 
-          {programmeMapping}
-          {programmePanel}
           {activeSchedule && formReady && <ScopeReadinessPanel key={activeSchedule.sha256} lines={formLines} model={activeSchedule.model} />}
           <FinalPvrForm key={caseId} caseId={caseId} title={c.title} lines={formLines} reportReady={formReady} whatIf={whatIf} blockers={formBlockers} drawingNotes={handoff?.openQuestions.filter(q=>q.id.startsWith('referenced-drawing-')).map(q=>q.issue)} verifyDrawingRevisions={drawingsAreCurrent} />
           {itemModal ? (

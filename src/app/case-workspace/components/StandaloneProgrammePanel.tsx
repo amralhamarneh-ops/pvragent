@@ -7,10 +7,9 @@ import {anchorKey,reviewProgrammeScope,type ProgrammeScopeLine,type ScopeDecisio
 import type {LoadedSchedule} from '@/lib/mapping/scheduleLoader';
 import type {GanttDates,GanttRow} from '@/lib/assessment/programmeGantt';
 import type {ScheduleActivity} from '@/lib/mapping/types';
+import {programmeScopeKey,type ProgrammeResult,type ProgrammeSnapshot} from '@/lib/assessment/programmeSnapshot';
 import type {ProgrammeWhatIf} from '@/lib/pvr/finalForm';
 
-type Delta={code:string;before:GanttDates|null;after:GanttDates};
-type Result={revision:2;scenarioBlocker?:string;sourceSha256:string;control:{ok:boolean;activities:number;dateMismatches:number;floatMismatches:number;milestones:number;milestoneDateMismatches:number;calculatedFinish:string;reasons:string[];examples?:{code:string;storedStart:string;storedFinish:string;recalculatedStart:string;recalculatedFinish:string}[]};simulation:null|{before:string;after:string;calendarDays:number;elapsedHours:number;activityChanges:Delta[];milestones:Delta[];movedActivities:number;changedMilestones:number;affectedActivities:number;drivingTieCount:number;drivingTies:{from:string;to:string;type:string}[]}};
 const milestone=(a?:ScheduleActivity)=>Boolean(a && ['milestone_start','milestone_finish'].includes(a.kind??''));
 const dates=(a?:ScheduleActivity):GanttDates|undefined=>a?{start:a.actualStart||a.earlyStart||a.start,finish:a.actualFinish||a.earlyFinish||a.finish,floatHours:a.totalFloatHours}:undefined;
 const byFinish=(a:GanttRow,b:GanttRow)=>(b.before?.finish||'').localeCompare(a.before?.finish||'');
@@ -19,14 +18,16 @@ const signed=(value:number)=>`${value>0?'+':''}${Number(value.toFixed(2))}`;
 const empty:ScopeDecision={treatment:'include',rate:'',basis:''};
 
 export default function StandaloneProgrammePanel({caseId,source,reference,scope,onScenario,verifyDrawings}:{caseId:string;source:LoadedSchedule;reference?:LoadedSchedule;scope:ProgrammeScopeLine[];verifyDrawings?:()=>Promise<boolean>;onScenario?:(v:ProgrammeWhatIf|null)=>void}) {
-  const [runResult,setRunResult]=useState<{input:string;result:Result}|null>(null);
+  const [runResult,setRunResult]=useState<{input:string;result:ProgrammeResult;savedAt?:string;saveWarning?:string}|null>(null);
+  const [saved,setSaved]=useState<ProgrammeSnapshot|null>(null);
+  const [touched,setTouched]=useState(false);
   const [decisions,setDecisions]=useState<Record<string,ScopeDecision>>({});
   const [error,setError]=useState(''),[busy,setBusy]=useState(false);
   const running=useRef<AbortController|null>(null);
-  const scopeKey=JSON.stringify(scope);
-  // A changed drawing/mapping/valuation must be reviewed again, even if the activity codes did not change.
+  const scopeKey=programmeScopeKey(scope);
   const [reviewedKey,setReviewedKey]=useState(scopeKey);
-  const activeDecisions=reviewedKey===scopeKey?decisions:{};
+  const savedForScope=saved?.review.scopeKey===scopeKey?saved:null;
+  const activeDecisions=touched?(reviewedKey===scopeKey?decisions:{}) : savedForScope?.review.decisions??{};
   const activities=useMemo(()=>new Map(source.model.activities.map(a=>[a.id,a])),[source]);
   const listId=useId();
   const anchors=useMemo(()=>{
@@ -43,9 +44,26 @@ export default function StandaloneProgrammePanel({caseId,source,reference,scope,
   },[activities,source]);
   const review=reviewProgrammeScope(scope,activeDecisions,anchors.keys);
   const input=JSON.stringify([scopeKey,activeDecisions]);
-  const result=runResult?.input===input?runResult.result:null;
-  useEffect(()=>()=>running.current?.abort(),[]);
   const localCase=caseId.startsWith('session-');
+  const endpoint=`/api/boq-cases/${encodeURIComponent(caseId)}/programme-simulation`;
+  const result=runResult?.input===input?runResult.result:!touched&&!review.error?savedForScope?.result??null:null;
+  useEffect(()=>()=>running.current?.abort(),[]);
+  useEffect(()=>{
+    if(localCase)return;
+    const cancel=new AbortController();
+    void (async()=>{
+      try {
+        const token=await getAccessToken();
+        if(!token||cancel.signal.aborted)return;
+        const query=new URLSearchParams({docId:source.docId,sha256:source.sha256});
+        const r=await fetch(endpoint+'?'+query,{cache:'no-store',headers:{Authorization:`Bearer ${token}`},signal:cancel.signal});
+        if(!r.ok)return;
+        const data=await r.json();
+        if(!cancel.signal.aborted)setSaved(data.snapshot??null);
+      } catch { /* New scenario remains available. */ }
+    })();
+    return ()=>cancel.abort();
+  },[endpoint,source.docId,source.sha256,localCase]);
   const simulation=result?.simulation;
   useEffect(()=>{
     onScenario?.(simulation?{before:simulation.before,after:simulation.after,calendarDays:simulation.calendarDays,input:source.fileName,sourceSha256:source.sha256,elapsedHours:simulation.elapsedHours,
@@ -71,7 +89,7 @@ export default function StandaloneProgrammePanel({caseId,source,reference,scope,
     return [...activities.values()].filter(a=>ref.has(a.id)).map(a=>({code:a.id,name:a.name,milestone:milestone(a),before:dates(a),after:dates(ref.get(a.id))})).sort((a,b)=>Number(b.milestone)-Number(a.milestone)||byFinish(a,b));
   },[activities,reference]);
   function edit(id:string,patch:Partial<ScopeDecision>) {
-    setReviewedKey(scopeKey);setDecisions({...activeDecisions,[id]:{...empty,...(Object.hasOwn(activeDecisions,id)?activeDecisions[id]:{}),...patch}});setError('');
+    setTouched(true);setReviewedKey(scopeKey);setDecisions({...activeDecisions,[id]:{...empty,...(Object.hasOwn(activeDecisions,id)?activeDecisions[id]:{}),...patch}});setError('');
   }
   async function run(changes:ReviewedChange[],fragments:ReviewedFragment[]=[]) {
     if(localCase||running.current)return;
@@ -80,13 +98,13 @@ export default function StandaloneProgrammePanel({caseId,source,reference,scope,
       if((changes.length+fragments.length) && verifyDrawings && !(await verifyDrawings()))throw new Error('The drawing revisions could not be verified. Process the current drawing pair before recalculating.');
       const token=await getAccessToken();
       if(!token)throw new Error('Sign in to calculate a private PVR programme.');
-      const r=await fetch(`/api/boq-cases/${encodeURIComponent(caseId)}/programme-simulation`,{
+      const r=await fetch(endpoint,{
         method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`},
-        body:JSON.stringify({docId:source.docId,sha256:source.sha256,changes,fragments}),signal:c.signal
+        body:JSON.stringify({docId:source.docId,sha256:source.sha256,changes,fragments,...(changes.length+fragments.length?{review:{scopeKey,decisions:activeDecisions}}:{})}),signal:c.signal
       });
       const data=await r.json();
       if(!r.ok || data.revision!==2 || data.sourceSha256!==source.sha256 || !data.control)throw new Error(data.error||'The calculation did not return a verified result.');
-      if(!c.signal.aborted)setRunResult({input,result:data as Result});
+      if(!c.signal.aborted)setRunResult({input,result:data as ProgrammeResult,savedAt:data.savedAt,saveWarning:data.saveWarning});
     } catch(e) {if(!c.signal.aborted)setError(e instanceof Error?e.message:'The calculation did not finish.');}
     finally {if(running.current===c)running.current=null;if(!c.signal.aborted)setBusy(false);}
   }
@@ -129,6 +147,9 @@ export default function StandaloneProgrammePanel({caseId,source,reference,scope,
       {scope.length>0&&review.error&&<p className="text-xs">{review.error}</p>}
       {busy&&<p role="status" className="text-sm">Checking the unchanged XER and recalculating the programme…</p>}
       {error&&<p role="alert" className="text-sm">{error}</p>}
+      {simulation&&runResult?.input===input&&runResult.saveWarning&&<p role="status" className="text-sm">{runResult.saveWarning}</p>}
+      {simulation&&(runResult?.input===input?!!runResult.savedAt:!!savedForScope)&&<p className="text-sm text-muted-foreground">{runResult?.input===input?'Scenario saved to this case.':'Saved scenario restored for the same programme and reviewed scope.'}</p>}
+      {saved&&!savedForScope&&!simulation&&<p className="text-xs text-muted-foreground">The saved scenario does not match the current scope or activity mapping. Review and recalculate.</p>}
       {result&&<div role="status" className="rounded border border-border bg-card p-3 text-sm">
         <p><strong>{result.control.ok?'Unchanged programme validated.':'Unchanged programme did not validate. No impact calculated.'}</strong> {result.control.activities.toLocaleString()} activities checked; {result.control.dateMismatches.toLocaleString()} date and {result.control.floatMismatches.toLocaleString()} float differences. {result.control.milestoneDateMismatches} of {result.control.milestones} milestone dates differed.</p>
         {result.scenarioBlocker&&<p className="font-medium">{result.scenarioBlocker} No impact forecast was accepted.</p>}
