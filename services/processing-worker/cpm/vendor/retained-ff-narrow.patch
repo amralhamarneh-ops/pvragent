@@ -1,0 +1,33 @@
+--- a/org/mpxj/cpm/PrimaveraScheduler.java
++++ b/org/mpxj/cpm/PrimaveraScheduler.java
+@@ -1472,7 +1472,30 @@
+    {
+       Task predecessorTask = relation.getPredecessorTask();
+       Task successorTask = relation.getSuccessorTask();
++      // PVRAgent modification (2026-11-28).
++      // With retained logic, the completed predecessor's recalculated logical
++      // finish can be later than its recorded actual finish. Carry that logic
++      // through to open successors and charge only lag not yet consumed.
++      if (predecessorTask.getActualFinish() != null && successorTask.getActualFinish() == null
++         && relation.getLag() != null && relation.getLag().getDuration() >= 0
++         && predecessorTask.getEarlyFinish() != null
++         && predecessorTask.getEarlyFinish().isAfter(predecessorTask.getActualFinish()))
++      {
++         double lagHours = relation.getLag().convertUnits(TimeUnit.HOURS, m_file.getProjectProperties()).getDuration();
++         var actualFinish = predecessorTask.getActualFinish();
++         var effectiveFinish = predecessorTask.getEarlyFinish();
++         if (lagHours > 0)
++         {
++            double consumed = actualFinish.isBefore(m_dataDate)
++               ? m_dateCalculator.getLagCalendar(relation).getWork(actualFinish, m_dataDate, TimeUnit.HOURS).getDuration() : 0;
++            if (lagHours > consumed)
++            {
++               effectiveFinish = m_dateCalculator.addLag(relation, effectiveFinish, Duration.getInstance(lagHours - consumed, TimeUnit.HOURS));
++            }
++         }
++         return new DrivingRelation(relation, getDateFromFinishAndRemainingDuration(successorTask, effectiveFinish), null);
++      }
+       LocalDateTime earlyStart;
+       LocalDateTime appliedEarlyFinish = null;
+
+       if (predecessorTask.getActualStart() == null)

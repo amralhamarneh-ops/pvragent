@@ -2,6 +2,7 @@
 
 import {useEffect,useMemo,useState} from 'react';
 import {compareProgrammeEvidence,describeProgramme,testDurationChange,validateRealProgramme} from '@/lib/assessment/realProgramme';
+import StandaloneProgrammePanel from './StandaloneProgrammePanel';
 import FragmentReplayPanel from '@/app/pvr-demo/FragmentReplayPanel';
 import {drivingPath} from '@/lib/assessment/cpmEngine';
 import type {ProgrammeWhatIf} from '@/lib/pvr/finalForm';
@@ -13,8 +14,8 @@ export function referenceOnlyProgramme(s: Pick<LoadedSchedule,'subrole'|'fileNam
     (!/\b(?:pre|before)[ -]?impact\b/i.test(name) && /\b(?:impacted|impact|post[- ]?impact)\b/i.test(name));
 }
 
-export default function RealProgrammePanel({source,references,confirmedTaskIds,onScenario}: {
-  source:LoadedSchedule; references:LoadedSchedule[]; confirmedTaskIds:string[]; onScenario?:(result:ProgrammeWhatIf|null)=>void;
+export default function RealProgrammePanel({caseId,source,references,confirmedTaskIds,onScenario}: {
+  caseId:string; source:LoadedSchedule; references:LoadedSchedule[]; confirmedTaskIds:string[]; onScenario?:(result:ProgrammeWhatIf|null)=>void;
 }) {
   const [refId,setRefId]=useState('');
   const [taskId,setTaskId]=useState('');
@@ -49,10 +50,11 @@ export default function RealProgrammePanel({source,references,confirmedTaskIds,o
       <p className="text-sm">Input: <strong>{source.fileName}</strong>. {current.activityCount.toLocaleString()} activities, {current.relationships.toLocaleString()} relationships{current.unresolvedRelationships ? ` (${current.unresolvedRelationships.toLocaleString()} excluded from logic)` : ''}. XER data date: {current.dataDate || 'not available'}. Stored forecast: {current.forecast || 'not available'}.</p>
       {Boolean(source.model.warnings?.length) && <details className="text-sm"><summary>XER import notices</summary><ul className="list-disc pl-5">{source.model.warnings?.map((w,i)=><li key={i}>{w}</li>)}</ul></details>}
       <div className="flex flex-wrap gap-3 items-center">
-        <button type="button" className="rounded border border-input px-3 py-2 text-sm" onClick={()=>{setValidate(true);setRun(false);}} disabled={validate}>Check unchanged programme</button>
+        <button type="button" className="rounded border border-input px-3 py-2 text-sm" onClick={()=>{setValidate(true);setRun(false);}} disabled={validate}>Check day-level compatibility</button>
         {references.length>0 ? <label className="text-sm">Processed PVR XER (reference only) <select className="rounded border border-input bg-card px-2 py-1" value={refId} onChange={e=>setRefId(e.target.value)}>
           <option value="">Select the processed result</option>{references.map(r=><option key={r.docId} value={r.docId}>{r.fileName}</option>)}</select></label> : <p className="text-sm text-muted-foreground">Upload the processed XER as a Reference programme to compare it separately.</p>}
       </div>
+      <StandaloneProgrammePanel caseId={caseId} source={source} reference={ref} confirmedTaskIds={confirmedTaskIds} />
       {checked && (checked.reasons.length ? <div role="status" className="rounded border border-warning/60 p-3 text-sm"><strong>No independently calculated delay.</strong> The unchanged programme is not validated.
         <ul className="list-disc pl-5">{checked.reasons.map(r=><li key={r}>{r}</li>)}</ul></div> :
         <div className="space-y-2 text-sm">

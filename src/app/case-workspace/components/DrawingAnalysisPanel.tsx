@@ -1,16 +1,17 @@
 'use client';
 
-import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Play } from 'lucide-react';
-import { AnalysisReadCache, analyseDocuments, type AnalysisOutput, type InputFile } from '@/lib/drawings/analyse';
+import { type AnalysisOutput } from '@/lib/drawings/analyse';
 import { evidenceForObject } from '@/lib/drawings/compare';
-import { loadCapabilities, serverExtractor, type ExtractionCapabilities } from '@/lib/drawings/extractClient';
-import { initialRun, runReducer } from '@/lib/drawings/runState';
-import { buildSnapshot, loadSnapshot, nextVersion, saveSnapshot, snapshotStatus, type AnalysisSnapshot } from '@/lib/drawings/snapshot';
+import { loadCapabilities, type ExtractionCapabilities } from '@/lib/drawings/extractClient';
+import { type RunState } from '@/lib/drawings/runState';
+import { loadSnapshot, snapshotStatus } from '@/lib/drawings/snapshot';
 import { buildLiveModel, buildViewModel, type ViewModel } from '@/lib/drawings/viewModel';
 import type { ReconciledChange } from '@/lib/drawings/types';
 import LiveAnalysisPreview from '@/app/case-workspace/components/LiveAnalysisPreview';
 import RealDrawingViewer from '@/app/case-workspace/components/RealDrawingViewer';
+import DrawingChangeSheets from '@/app/pvr-demo/DrawingChangeSheets';
 
 export interface PanelDoc { id: string; name: string; sha256: string; role: string; bytes: Uint8Array | null }
 
@@ -19,90 +20,25 @@ interface Props {
   scopeId: string;
   documents: PanelDoc[];
   narrative: string;
-  /** Called with the finished output so the surrounding flow can use the same result (changes, extracted text, schedules). */
-  onComplete?: (out: AnalysisOutput) => void;
+  run: RunState;
+  out: AnalysisOutput | null;
+  streamGeometry: boolean;
+  onStreamGeometry: (enabled: boolean) => void;
+  onStart: () => void;
+  onCancel: () => void;
 }
 
-const newRunId = () => `run-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`;
-
-/**
- * Real drawing analysis for the open case: runs the actual parsers, streams their events and geometry batches into the
- * viewer as they arrive, and saves a new version of the result. It reads the SAME document registry as the rest of the
- * flow (documents prop) and never uses demo drawings.
- */
-export default function DrawingAnalysisPanel({ scopeId, documents, narrative, onComplete }: Props) {
-  const [run, dispatch] = useReducer(runReducer, undefined, initialRun);
-  const [out, setOut] = useState<AnalysisOutput | null>(null);
-  const [snap, setSnap] = useState<AnalysisSnapshot | null>(null);
+/** The real assessment owns the run; the preview doesn't start a second parser or alter its results. */
+export default function DrawingAnalysisPanel({ scopeId, documents, narrative, run, out, streamGeometry, onStreamGeometry, onStart, onCancel }: Props) {
   const [caps, setCaps] = useState<ExtractionCapabilities | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [replaying, setReplaying] = useState(false);
   const [revealed, setRevealed] = useState<string[] | null>(null);
-  const [error, setError] = useState('');
-  const [streamGeometry, setStreamGeometry] = useState(true);
-  const reads = useRef(new AnalysisReadCache());
-  const abortRef = useRef<AbortController | null>(null);
-  const scopeRef = useRef(scopeId);
-  scopeRef.current = scopeId;
-  const activeRun = useRef<string | null>(null);
-
-  // A different case invalidates everything held for the previous one, and cancels its run.
-  useEffect(() => {
-    abortRef.current?.abort(); abortRef.current = null; activeRun.current = null;
-    reads.current = new AnalysisReadCache();
-    dispatch({ type: 'reset' }); setOut(null); setSelected(null); setReplaying(false); setRevealed(null); setError('');
-    setSnap(loadSnapshot(scopeId));
-  }, [scopeId]);
   useEffect(() => { const ac = new AbortController(); void loadCapabilities(ac.signal).then(setCaps); return () => ac.abort(); }, []);
-  useEffect(() => () => { abortRef.current?.abort(); }, []);
-
-  const usable = useMemo(() => documents.filter((d) => ['drawings', 'pvr', 'correspondence', 'schedule', 'contract', 'reference', 'site'].includes(d.role)), [documents]);
+  useEffect(() => { setSelected(null); setReplaying(false); setRevealed(null); }, [run.runId]);
+  const usable = useMemo(() => documents.filter((d) => ['drawings', 'pvr', 'correspondence', 'schedule', 'contract', 'site'].includes(d.role)), [documents]);
+  const snap = useMemo(() => loadSnapshot(scopeId), [scopeId, out]);
   const status = useMemo(() => (snap ? snapshotStatus(snap, documents.map((d) => ({ id: d.id, sha256: d.sha256, role: d.role })), narrative) : null), [snap, documents, narrative]);
-
-  // Cancel a running analysis whose inputs just changed: its output would be obsolete.
-  const inputKey = useMemo(() => usable.map((d) => `${d.id}:${d.sha256}:${d.role}`).join('|') + `#${narrative}`, [usable, narrative]);
-  const lastKey = useRef(inputKey);
-  useEffect(() => {
-    if (lastKey.current !== inputKey && abortRef.current && activeRun.current) {
-      abortRef.current.abort(); dispatch({ type: 'cancel', runId: activeRun.current, caseId: scopeRef.current }); activeRun.current = null;
-    }
-    lastKey.current = inputKey;
-  }, [inputKey]);
-
-  const start = useCallback(async () => {
-    abortRef.current?.abort();
-    const ac = new AbortController(); abortRef.current = ac;
-    const runId = newRunId(); const caseId = scopeRef.current;
-    setPairIdx(0);
-    activeRun.current = runId; setError(''); setOut(null); setSelected(null); setReplaying(false); setRevealed(null);
-    dispatch({ type: 'start', runId, caseId, at: Date.now() });
-    const files: InputFile[] = usable.map((d) => ({ name: d.name, bytes: d.bytes, role: d.role as InputFile['role'], docId: d.id }));
-    try {
-      const result = await analyseDocuments({
-        files, narrative, runId, caseId, signal: ac.signal, extractor: serverExtractor, streamGeometry,
-        readCache: streamGeometry ? undefined : reads.current,
-        capabilities: caps ? { ocrScannedPdf: caps.ocrScannedPdf, dwg: caps.dwg } : null,
-        // Events and geometry batches carry this run/case; the reducer discards anything that does not match the active run.
-        onEvent: (event) => { if (activeRun.current === runId) dispatch({ type: 'event', event }); },
-      });
-      if (ac.signal.aborted || activeRun.current !== runId || scopeRef.current !== caseId) return; // cancelled or superseded
-      setOut(result);
-      dispatch({ type: 'complete', runId, caseId });
-      const s = buildSnapshot(caseId, runId, result, usable.map((d) => ({ id: d.id, name: d.name, sha256: d.sha256, role: d.role })), narrative, nextVersion(caseId));
-      const saved = saveSnapshot(s); setSnap(s);
-      if (!saved) setError('The analysis finished but could not be saved in this browser (storage full). It will need to be re-run after reopening.');
-      onComplete?.(result);
-    } catch (e) {
-      if (ac.signal.aborted || activeRun.current !== runId) return;
-      dispatch({ type: 'fail', runId, caseId, message: e instanceof Error ? e.message : 'failed' });
-      setError(`The analysis failed: ${e instanceof Error ? e.message : 'unknown error'}`);
-    }
-  }, [usable, narrative, caps, onComplete, streamGeometry]);
-
-  const cancel = useCallback(() => {
-    if (!activeRun.current) return;
-    abortRef.current?.abort(); dispatch({ type: 'cancel', runId: activeRun.current, caseId: scopeRef.current }); activeRun.current = null;
-  }, []);
 
   // The comparison model uses the SAME per-object relocation evidence as the measurement, so picture and numbers agree.
   const pairs = useMemo(() => out?.pairs.filter((p) => p.validated) ?? [], [out]);
@@ -115,6 +51,8 @@ export default function DrawingAnalysisPanel({ scopeId, documents, narrative, on
     return buildViewModel(pair, out.changes, resolver);
   }, [out, pair]);
   const running = run.status === 'running';
+  // The canvas/SVG viewer has its own render budget; do not render each large CAD entity four times as sheet previews.
+  const canShowSheets = model !== null && model.entities.length <= 2400;
   // Geometry drawn from received batches while the run is live (and after, until a comparison model exists).
   const live = useMemo(() => (Object.keys(run.live).length ? buildLiveModel(run.live) : null), [run.live, run.geometryVersion]); // eslint-disable-line react-hooks/exhaustive-deps
   const finishedLayers = useMemo(() => (model ? model.layers.map((l) => ({ name: l.name, count: l.total })) : []), [model]);
@@ -134,16 +72,21 @@ export default function DrawingAnalysisPanel({ scopeId, documents, narrative, on
           {caps && !caps.dwg.configured ? <p className="mt-1 text-xs text-muted-foreground">DWG conversion is not configured on this deployment ({caps.dwg.requirement}). Upload ASCII DXF to measure drawings.</p> : null}
           {caps && !caps.ocrScannedPdf ? <p className="mt-1 text-xs text-muted-foreground">Scanned PDF pages cannot be OCR’d here (rasteriser unavailable); images and text PDFs are read.</p> : null}
         </div>
-        <label className="flex items-center gap-2 text-sm text-muted-foreground"><input type="checkbox" checked={streamGeometry} disabled={running} onChange={(e) => setStreamGeometry(e.target.checked)} /> Animate geometry while processing <span className="text-xs">(turn off for large drawings)</span></label>
-        <button type="button" onClick={() => void start()} disabled={usable.length === 0 || running} className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 font-semibold text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground"><Play size={16} aria-hidden />{running ? 'Analysing…' : out || snap ? 'Re-run analysis' : 'Run analysis'}</button>
+        <label className="flex items-center gap-2 text-sm text-muted-foreground"><input type="checkbox" checked={streamGeometry} disabled={running} onChange={(e) => onStreamGeometry(e.target.checked)} /> Animate geometry while processing <span className="text-xs">(turn off for large drawings)</span></label>
+        <button type="button" onClick={onStart} disabled={(usable.length === 0 && narrative.trim().length <= 10) || running} className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 font-semibold text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground"><Play size={16} aria-hidden />{running ? 'Analysing…' : out || snap ? 'Re-run analysis' : 'Run analysis'}</button>
       </div>
-      {error ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 px-4 py-2 text-destructive">{error}</p> : null}
       {status && !status.current && !out ? <p role="status" className="flex items-start gap-2 rounded-md border border-warning bg-warning/10 px-4 py-2 text-sm text-foreground"><AlertTriangle size={16} className="mt-0.5 shrink-0" aria-hidden /><span>The saved analysis (v{snap!.version}, {new Date(snap!.savedAt).toLocaleString('en-GB', { timeZone: 'UTC' })} UTC) is out of date: {status.reasons.join(' ')} Re-run the analysis to refresh the results. Dependent mappings and calculations built from it are out of date until then; they are kept as earlier versions.</span></p> : null}
 
-      <LiveAnalysisPreview run={run} finishedLayers={finishedLayers} onCancel={cancel} replaying={replaying} onReplayStart={startReplay} onReplayStop={stopReplay} onReveal={setRevealed} streamGeometry={streamGeometry} />
+      <LiveAnalysisPreview run={run} finishedLayers={finishedLayers} onCancel={onCancel} replaying={replaying} onReplayStart={startReplay} onReplayStop={stopReplay} onReveal={setRevealed} streamGeometry={streamGeometry} />
 
       {pairs.length > 1 ? <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="Drawing pairs">{pairs.map((p, i) => <button key={p.revised.fileName + i} type="button" role="tab" aria-selected={i === pairIdx} onClick={() => setPairIdx(i)} className={`rounded border px-2.5 py-1 text-sm ${i === pairIdx ? 'border-primary bg-primary text-primary-foreground' : 'border-input hover:bg-muted'}`}>{p.revised.titleBlock?.drawingNumber || `Pair ${i + 1}`}</button>)}</div> : null}
-      {(model || live) && run.status !== 'idle' ? (
+      {model && out && run.status === 'complete' && canShowSheets && !replaying
+        ? <DrawingChangeSheets key={pairIdx} model={model} changes={out.changes} /> : null}
+      {model && !canShowSheets && !replaying ? <p className="text-sm text-muted-foreground">This pair uses the interactive viewer below: the full-size drawing has too many entities for duplicate side-by-side sheet previews. Switch revisions or choose a highlighted change to inspect it.</p> : null}
+      {out && !model && driveDrawings > 0 ? <p role="status" className="rounded-md border border-border bg-card p-3 text-sm text-muted-foreground">
+        No verified revision pair with vector geometry was available. Check the drawing revisions and file reading results before using measurements.
+      </p> : null}
+      {(model || live) && run.status !== 'idle' && (replaying || !canShowSheets) ? (
         <RealDrawingViewer
           model={model && out ? model : null}
           live={model && out ? null : live}

@@ -1,0 +1,21 @@
+ERMHDR	23.12	2026-11-27	Project	DEMO	Demo	AED
+%T	PROJECT
+%F	proj_id	proj_short_name	clndr_id	last_recalc_date	plan_start_date	scd_end_date	critical_path_type
+%R	1	CPM VERIFICATION	1	2027-02-01 08:00	2027-02-01 08:00	2027-02-02 17:00	CT_TotFloat
+%T	CALENDAR
+%F	clndr_id	default_flag	clndr_name	clndr_type	day_hr_cnt	week_hr_cnt	month_hr_cnt	year_hr_cnt	clndr_data
+%R	1	Y	Test working calendar	CA_Base	8	40	172	2080	(0||CalendarData()((0||DaysOfWeek()((0||1()())(0||2()((0||0(s|08:00|f|12:00)())(0||1(s|13:00|f|17:00)())))(0||3()((0||0(s|08:00|f|12:00)())(0||1(s|13:00|f|17:00)())))(0||4()((0||0(s|08:00|f|12:00)())(0||1(s|13:00|f|17:00)())))(0||5()((0||0(s|08:00|f|12:00)())(0||1(s|13:00|f|17:00)())))(0||6()((0||0(s|08:00|f|12:00)())(0||1(s|13:00|f|17:00)())))(0||7()())))(0||VIEW(ShowTotal|Y)())(0||Exceptions()())))
+%T	SCHEDOPTIONS
+%F	schedoptions_id	proj_id	sched_retained_logic	sched_progress_override	sched_float_type	sched_calendar_on_relationship_lag	sched_use_expect_end_flag
+%R	1	1	Y	N	FT_FF	rcal_Predecessor	N
+%T	PROJWBS
+%F	wbs_id	proj_id	proj_node_flag	wbs_name	wbs_short_name	seq_num
+%R	10	1	Y	Civil Test	TEST	1
+%T	TASK
+%F	task_id	proj_id	wbs_id	clndr_id	task_type	duration_type	status_code	task_code	task_name	total_float_hr_cnt	free_float_hr_cnt	remain_drtn_hr_cnt	target_drtn_hr_cnt	early_start_date	early_end_date	target_start_date	target_end_date	restart_date	reend_date
+%R	101	1	10	1	TT_Task	DT_FixedDrtn	TK_NotStart	WORK	Civil work	0	0	16	16	2027-02-01 08:00	2027-02-02 17:00	2027-02-01 08:00	2027-02-02 17:00	2027-02-01 08:00	2027-02-02 17:00
+%R	102	1	10	1	TT_FinMile	DT_FixedDrtn	TK_NotStart	END	Completion	0	0	0	0	2027-02-02 17:00	2027-02-02 17:00	2027-02-02 17:00	2027-02-02 17:00	2027-02-02 17:00	2027-02-02 17:00
+%T	TASKPRED
+%F	task_pred_id	task_id	pred_task_id	proj_id	pred_proj_id	pred_type	lag_hr_cnt
+%R	80	102	101	1	1	PR_FS	0
+%E
