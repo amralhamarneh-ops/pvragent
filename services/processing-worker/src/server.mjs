@@ -13,7 +13,7 @@ import { JobManager } from './jobs.mjs';
 import { extractByName, sniff, LIMITS, ocrLanguageOptions, scanRasterizerReady } from './extract.mjs';
 import { convertDwg, probeDwg } from './dwg.mjs';
 import { startRunner, runnerState } from './runner.mjs';
-import { storeConfig } from './store.mjs';
+import { probeQueue, storeConfig } from './store.mjs';
 import { readDxfForWorker } from './dxf.mjs';
 
 import { scheduleCpmRoute } from './scheduleCpmRoute.mjs';
@@ -79,6 +79,11 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { status: 'ok', service: 'pvr-processing-worker', authConfigured: !!TOKEN, limits: LIMITS, running: manager.running, queued: manager.queue.length, durable: { configured: sc.ok, missing: sc.missing, runnerStarted: runnerState.started, workerId: runnerState.workerId, tasksRunning: runnerState.running, tasksProcessed: runnerState.processed, lastClaimAt: runnerState.lastClaimAt, lastError: runnerState.lastError }, dependencies: { scheduleCpmConfigured: !!process.env.PVR_MPXJ_CLASSPATH, pdfText: pdf, docx, rasteriser: rasterizer, ocrEngine: ocr, dwg: dwg.ok ? { ok: true, converter: dwg.converter, version: dwg.version } : { ok: false, reason: dwg.error } } });
     }
     if (!authed(req)) return json(res, TOKEN ? 401 : 503, { error: TOKEN ? 'Unauthorised.' : 'WORKER_API_TOKEN is not configured on the worker.' });
+
+    if (req.method === 'GET' && url.pathname === '/ready/queue') {
+      const readiness = await probeQueue(req.headers['x-pvr-database'], runnerState.started);
+      return json(res, readiness.ready ? 200 : 503, readiness);
+    }
 
     if (req.method === 'POST' && url.pathname === '/schedule/cpm/v2') return await scheduleCpmRoute(req,res,json,2);
     if (req.method === 'POST' && url.pathname === '/schedule/cpm') return await scheduleCpmRoute(req,res,json);

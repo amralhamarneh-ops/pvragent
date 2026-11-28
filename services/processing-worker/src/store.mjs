@@ -1,10 +1,12 @@
+import { createHash, randomUUID } from 'node:crypto';
+
 /**
  * Durable job store client for the worker. Talks to Postgres ONLY through the pvr_worker_* SECURITY DEFINER functions,
  * authenticated with a shared secret (WORKER_DB_SECRET). It holds no user session and no service-role key.
  * Every state change (claim, heartbeat, event, complete, release) is persisted before the worker acts on it.
  * Original files are fetched from a short-lived signed URL that the app server attached to the task.
  */
-const URL_ = () => (process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '').replace(/\/$/, '');
+const URL_ = () => (process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '').trim().replace(/\/+$/, '');
 const KEY_ = () => process.env.SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
 const SECRET = () => process.env.WORKER_DB_SECRET || '';
 
@@ -18,7 +20,7 @@ export const storeConfig = () => {
 
 async function rpc(fn, args, { signal } = {}) {
   const res = await fetch(`${URL_()}/rest/v1/rpc/${fn}`, {
-    method: 'POST', cache: 'no-store', signal,
+    method: 'POST', cache: 'no-store', redirect: 'error', signal,
     headers: { apikey: KEY_(), Authorization: `Bearer ${KEY_()}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(args),
   });
@@ -36,6 +38,23 @@ export const store = {
   release: (taskId, token, reason, requeue) => rpc('pvr_worker_release', { p_secret: SECRET(), p_task_id: taskId, p_lease_token: token, p_reason: reason ?? '', p_requeue: !!requeue }),
   document: (taskId, token) => rpc('pvr_worker_document', { p_secret: SECRET(), p_task_id: taskId, p_lease_token: token }),
 };
+
+/** Read-only readiness probe: the supplied project must match and Supabase must accept the worker
+ * secret through the existing document RPC. Random dummy identifiers ensure it reads no case. */
+export async function probeQueue(expectedProject, runnerStarted) {
+  if (!storeConfig().ok || !runnerStarted) return { ready: false, code: 'runner_not_started' };
+  const actual = createHash('sha256').update(URL_()).digest('hex');
+  if (expectedProject !== actual) return { ready: false, code: 'wrong_project' };
+  try {
+    const result = await rpc('pvr_worker_document', {
+      p_secret: SECRET(), p_task_id: `readiness-${randomUUID()}`, p_lease_token: randomUUID(),
+    }, { signal: AbortSignal.timeout(5_000) });
+    if (result !== null) return { ready: false, code: 'database_rejected' };
+    return { ready: true };
+  } catch {
+    return { ready: false, code: 'database_rejected' };
+  }
+}
 
 /** Download the original from the signed URL attached to the task. The worker never holds storage credentials. */
 export async function downloadSigned(url, { signal } = {}) {
