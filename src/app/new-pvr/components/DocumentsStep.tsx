@@ -3,7 +3,7 @@
 import React, { useCallback, useRef, useState } from 'react';
 import { FolderOpen, Upload } from 'lucide-react';
 import type { IncomingFile } from '@/lib/intake/triage';
-import { MAX_DOC_BYTES } from '@/lib/docs/registry';
+import { documentSizeNotice, MAX_DOC_BYTES, MAX_EXPANDED_ZIP_BYTES, MAX_ZIP_BYTES, MAX_ZIP_ENTRIES, readBoundedZipEntry } from '@/lib/intake/uploadLimits';
 
 interface DocumentsStepProps {
   onAdd: (files: IncomingFile[]) => void;
@@ -25,7 +25,7 @@ async function readEntry(entry: FsEntry, out: IncomingFile[], real: Map<string, 
   if (entry.isFile && entry.file) {
     const f = await new Promise<File>((res, rej) => entry.file!(res, rej));
     const path = entry.fullPath.replace(/^\//, '');
-    if (f.size > MAX_DOC_BYTES) { skipped.push(`${path} (larger than 25 MB)`); return; }
+    if (f.size > MAX_DOC_BYTES) { skipped.push(documentSizeNotice(path, f.size)); return; }
     real.set(path, f);
     out.push(await toIncoming(f, path));
   } else if (entry.isDirectory && entry.createReader) {
@@ -55,12 +55,30 @@ const FOLDER_ATTRS: React.InputHTMLAttributes<HTMLInputElement> & { webkitdirect
  * subset of extensions, so nothing a later stage needs is silently dropped.
  */
 export async function expandZip(zipFile: File, out: IncomingFile[], real: Map<string, File>, skipped: string[]): Promise<void> {
+  if (zipFile.size > MAX_ZIP_BYTES) {
+    skipped.push(`${zipFile.name} exceeds the 100 MiB browser ZIP limit. Extract it on your computer and choose the folder; the 25 MiB per-file limit still applies.`);
+    return;
+  }
   const JSZip = (await import('jszip')).default;
   const zip = await JSZip.loadAsync(zipFile);
   const entries = Object.values(zip.files).filter((z) => !z.dir && !z.name.includes('..') && !z.name.startsWith('/') && !/(^|\/)(__MACOSX|\.DS_Store)/.test(z.name));
+  if (entries.length > MAX_ZIP_ENTRIES) {
+    skipped.push(`${zipFile.name} contains more than ${MAX_ZIP_ENTRIES} files. Extract it and choose only the files relevant to this PVR.`);
+    return;
+  }
+  let addedBytes = 0;
   for (const z of entries) {
-    const blob = await z.async('blob');
-    if (blob.size > MAX_DOC_BYTES) { skipped.push(`${z.name} (larger than 25 MB)`); continue; }
+    const remaining = MAX_EXPANDED_ZIP_BYTES - addedBytes;
+    const blob = await readBoundedZipEntry(z, Math.min(remaining, MAX_DOC_BYTES));
+    if (!blob) {
+      if (remaining < MAX_DOC_BYTES) {
+        skipped.push(`${zipFile.name}: the remaining entries were not added because the browser ZIP expansion limit was reached. Extract the archive and add the outstanding documents separately.`);
+        break;
+      }
+      skipped.push(documentSizeNotice(z.name));
+      continue;
+    }
+    addedBytes += blob.size;
     const f = new File([blob], z.name.split('/').slice(-1)[0]);
     real.set(z.name, f);
     out.push(await toIncoming(f, z.name));
@@ -81,7 +99,7 @@ export default function DocumentsStep({ onAdd, onFiles, onReadingChange }: Docum
     // Register the real bytes BEFORE listing the files, so a listed file always has contents behind it.
     await onFiles?.(real);
     onAdd(out);
-    setNote(skipped.length ? `Not added: ${skipped.join('; ')}.` : '');
+    setNote(skipped.length ? `Not added: ${skipped.join(' ')}` : '');
   }, [onAdd, onFiles]);
 
   const addFromInput = useCallback(async (list: FileList | null) => {
@@ -95,7 +113,7 @@ export default function DocumentsStep({ onAdd, onFiles, onReadingChange }: Docum
       for (const f of Array.from(list)) {
         const rel = (f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name;
         if (/\.zip$/i.test(f.name)) await expandZip(f, out, real, skipped);
-        else if (f.size > MAX_DOC_BYTES) skipped.push(`${rel} (larger than 25 MB)`);
+        else if (f.size > MAX_DOC_BYTES) skipped.push(documentSizeNotice(rel, f.size));
         else { real.set(rel, f); out.push(await toIncoming(f, rel)); }
       }
       await finish(out, real, skipped);
@@ -131,6 +149,7 @@ export default function DocumentsStep({ onAdd, onFiles, onReadingChange }: Docum
       } else {
         for (const f of Array.from(e.dataTransfer.files)) {
           if (/\.zip$/i.test(f.name)) await expandZip(f, out, real, skipped);
+          else if (f.size > MAX_DOC_BYTES) skipped.push(documentSizeNotice(f.name, f.size));
           else { real.set(f.name, f); out.push(await toIncoming(f, f.name)); }
         }
       }
@@ -154,7 +173,7 @@ export default function DocumentsStep({ onAdd, onFiles, onReadingChange }: Docum
           <FolderOpen size={32} className="text-primary" aria-hidden />
           <div>
             <p className="font-semibold text-foreground">Upload everything once: drawings, PVR, BOQs, programme (.xer)</p>
-            <p className="text-sm text-muted-foreground">Drop files, a folder or a ZIP. BOQ workbooks are read automatically; you do not upload them again. Files are kept with the case after you start the assessment.</p>
+            <p className="text-sm text-muted-foreground">Drop files, a folder or a ZIP (up to 100 MiB). Individual files must be 25 MiB or less. BOQ workbooks are read automatically.</p>
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">

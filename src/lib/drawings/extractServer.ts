@@ -7,10 +7,9 @@
  * Every result keeps page numbers, and every limit (page cap, size cap) is reported, never silently applied.
  * `coverage` states exactly how many units were read, OCR'd, skipped or failed.
  */
-import { execFile } from 'node:child_process';
+import { runFile } from '../server/execFile';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { ExtractedDocument } from './types';
@@ -36,16 +35,15 @@ export const IMAGE_EXT = ['png', 'jpg', 'jpeg', 'tif', 'tiff', 'bmp', 'webp'];
 
 type OnPage = (info: { page: number; total: number; chars: number; method: string }) => void;
 
-const run = promisify(execFile);
 const poppler = (env = process.env) => env.PDF_RASTERIZER_PATH?.trim() || 'pdftoppm';
 export async function scanRasterizerReady() {
-  try { await run(poppler(), ['-v'], { timeout: 3_000, maxBuffer: 32_000 }); return true; } catch { return false; }
+  try { await runFile(poppler(), ['-v'], { timeout: 3_000, maxBuffer: 32_000 }); return true; } catch { return false; }
 }
 async function rasterise(file: string, page: number): Promise<Uint8Array> {
   // Isolate native rendering in a subprocess. A malformed PDF or an unavailable renderer must not crash the app.
-  const { stdout } = await run(poppler(), ['-f',String(page),'-l',String(page),'-r','144',
+  const { stdout } = await runFile(poppler(), ['-f',String(page),'-l',String(page),'-r','144',
     '-scale-to',String(Math.floor(Math.sqrt(MAX_OCR_PIXELS))),'-png','-singlefile',file],
-    {encoding:'buffer',timeout:15_000,maxBuffer:15*1024*1024,windowsHide:true});
+    {encoding:'buffer',timeout:15_000,maxBuffer:15*1024*1024});
   if (stdout.subarray(1,4).toString() !== 'PNG') throw new Error('PDF rendering produced no PNG.');
   return stdout;
 }
@@ -83,16 +81,23 @@ export async function extractPdf(name: string, bytes: Uint8Array, onPage?: OnPag
     try {
       const page = await doc.getPage(p);
       const tc = await page.getTextContent();
-      const text = tc.items.map((it) => ('str' in it ? it.str + ('hasEOL' in it && it.hasEOL ? '\n' : ' ') : '')).join('').replace(/[ \t]+/g, ' ').trim();
+      const nativeText = tc.items.map((it) => ('str' in it ? it.str + ('hasEOL' in it && it.hasEOL ? '\n' : ' ') : '')).join('').replace(/[ \t]+/g, ' ').trim();
+      const annotations = await page.getAnnotations({ intent: 'display' }).catch(() => []);
+      const notes = [...new Set(annotations
+        .filter((a) => ['FreeText', 'Text', 'Polygon', 'PolyLine', 'Line', 'Square', 'Circle', 'Ink', 'Highlight'].includes(a.subtype))
+        .map((a) => typeof a.contentsObj?.str === 'string' ? a.contentsObj.str.trim().slice(0, 500) : '')
+        .filter((a) => a && !nativeText.includes(a)))].slice(0, 100);
+      // A markup note is not drawn geometry and never substitutes for the scan's underlying text.
+      const text = [nativeText, notes.length ? '[PDF annotations; review against the sheet]\n' + notes.join('\n') : ''].filter(Boolean).join('\n');
       pages.push({ page: p, text });
       // A small native caption/watermark can coexist with a raster-only drawing.
       let rasterBody = false;
-      if (text.length >= MIN_TEXT_CHARS_PER_PAGE && text.length < 120) {
+      if (nativeText.length >= MIN_TEXT_CHARS_PER_PAGE && nativeText.length < 120) {
         const ops = await page.getOperatorList().catch(() => null);
         if (ops) rasterBody = ops.fnArray.some((op, i) =>
           op === pdfjs.OPS.paintImageXObject && Number(ops.argsArray[i]?.[1]) >= 512 && Number(ops.argsArray[i]?.[2]) >= 384);
       }
-      if (text.length < MIN_TEXT_CHARS_PER_PAGE || rasterBody) scanned.push(p);
+      if (nativeText.length < MIN_TEXT_CHARS_PER_PAGE || rasterBody) scanned.push(p);
       onPage?.({ page: p, total: limit, chars: text.length, method: 'pdf-text' });
     } catch { pages.push({ page: p, text: '' }); failedPages.push(p); }
   }
