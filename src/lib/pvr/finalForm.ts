@@ -26,10 +26,10 @@ export interface FormLine extends TotalsLine {
   rateFallback:boolean;
   mappedActivity?:string;
 }
-export interface ProgrammeWhatIf {before:string; after:string; calendarDays:number; input:string; activity:string;sourceSha256?:string;elapsedHours?:number;scopeAudit?:{line:string;basis:string;outcome:string}[]}
+export interface ProgrammeWhatIf {before:string; after:string; calendarDays:number; input:string; activity:string;sourceSha256?:string;elapsedHours?:number;scopeAudit?:{line:string;basis:string;outcome:string}[]; programmeAudit?:{verifiedActivities:number;verifiedMilestones:number;changedMilestones:number;milestoneMovements:{code:string;before:string|null;after:string}[];drivingTieCount:number;drivingTies:{from:string;to:string;type:string}[]}}
 export interface FormInput {
   details:FormDetails; lines:FormLine[]; references?:Record<string,TakeoffReference>;
-  reportReady:boolean; whatIf?:ProgrammeWhatIf|null; blockers?:string[]; drawingNotes?:string[];
+  reportReady:boolean; whatIf?:ProgrammeWhatIf|null; blockers?:string[]; drawingNotes?:string[]; drawingEvidenceCurrent?:boolean;
 }
 export function compareTakeoff(line:Pick<FormLine,'quantity'|'quantityUnit'|'drawingSource'>, ref?:TakeoffReference) {
   if (!ref?.citation.trim() || !validateDecimalText(ref.value) || !line.drawingSource || !line.quantity || !validateDecimalText(line.quantity) ||
@@ -47,15 +47,21 @@ const section = (text:string) => '<h2>'+text+'</h2>';
 const primary = (label:string,value:unknown) => '<tr><th>'+e(label)+'</th><td>'+display(value)+'</td></tr>';
 
 export function renderPvrForm(input:FormInput):string {
-  const {details:d,reportReady,whatIf}=input;
+  const {details:d,reportReady}=input;
+  const stale=input.drawingEvidenceCurrent===false;
+  const whatIf=stale?null:input.whatIf;
+  const programmeAudit=whatIf?.programmeAudit;
   const exclusions=d.scopeExclusions?.trim();
   const drawingNotes=[...new Set((input.drawingNotes??[]).map(n=>n.trim()).filter(Boolean))];
   // Defence in depth: the report never values a line that has not come through a cited drawing takeoff.
-  const lines=input.lines.map<FormLine>(l=>l.disposition==='priced' && (!l.drawingSource || !l.quantity || !validateDecimalText(l.quantity))
+  const lines=input.lines.map<FormLine>(l=>stale
+    ? {...l,disposition:l.disposition==='priced'?'unpriced':l.disposition,signedAmount:null,quantity:null,
+      drawingSource:'',rate:null,rateSource:'Withheld pending drawing verification',rateFallback:false,mappedActivity:undefined}
+    : l.disposition==='priced' && (!l.drawingSource || !l.quantity || !validateDecimalText(l.quantity))
     ? {...l,disposition:'unpriced',signedAmount:null} : l);
   const totals=totalsFor(lines);
   const total=totals.perCurrency[0];
-  const pendingCost=!reportReady || totals.mixedCurrency || !total?.complete;
+  const pendingCost=stale || !reportReady || totals.mixedCurrency || !total?.complete;
   const pricing=totals.perCurrency.filter(t=>t.pricedSubtotal!==null).map(t=>money(t.pricedSubtotal!,t.currency)).join(' / ');
   const cost=pendingCost ? 'Pending verification'+(pricing?' (priced subtotal only: '+pricing+')':'') : pricing;
   const scopedCost=exclusions ? cost+' (excludes the scope noted below)' : cost;
@@ -82,7 +88,7 @@ export function renderPvrForm(input:FormInput):string {
     const ref=refs[l.lineId], delta=compareTakeoff(l,ref);
     const qe=l.drawingSource && l.quantity ? e(l.quantity)+' '+e(l.quantityUnit)+'<small>'+e(l.drawingSource)+'</small>' : 'Not verified from drawings';
     const rate = l.rate ? money(l.rate,l.currency)+' / '+e(l.rateUnit)+'<small>'+e(l.rateSource)+'</small>' : display(l.rateSource);
-    return '<tr><td>'+e(l.description)+'<small>'+e(l.mappedActivity??'')+'</small></td><td>'+qe+'</td><td>'+rate+'</td><td>'+
+    return '<tr><td>'+e(l.description)+'<small>'+e(l.mappedActivity || (stale?'Mapping withheld: drawing revisions not verified':'No confirmed mapping to the selected XER'))+'</small></td><td>'+qe+'</td><td>'+rate+'</td><td>'+
       (l.disposition==='priced' && l.signedAmount!==null?money(l.signedAmount,l.currency):disposition[l.disposition])+'</td><td>'+
       (ref?.citation.trim() && validateDecimalText(ref.value) ? e(ref.value)+' '+e(ref.unit)+'<small>'+e(ref.citation)+'</small>'+(delta!==null?'<small>Drawings less reference: '+e(delta)+' '+e(l.quantityUnit)+'</small>':'<small>Not comparable</small>') : '—')+'</td></tr>';
   }).join('');
@@ -101,13 +107,20 @@ ${section('RECOMMENDATIONS')}<table><tr><td>${check(d.recommendation==='Sign VO 
 ${section('APPROVALS')}<table class="approval"><thead><tr><th style="width:13%">Stage</th><th style="width:22%">Role</th><th style="width:33%">Title</th><th style="width:15%">Name</th><th style="width:17%">Signature &amp; Date</th></tr></thead><tbody>${approvalRows}</tbody><tfoot><tr><th colspan="3">Received by Procurement Dept.</th><td></td><td></td></tr></tfoot></table>
 <p class="classification">Internal working document. No approval or signature is implied.</p>
 <div class="annex">${section('ANNEX — QUANTITY, COST AND PROGRAMME AUDIT')}
+${stale?'<p><strong>Drawing revisions were not verified at export. Quantities, cost, mappings and scenarios are withheld.</strong></p>':''}
 <p>Quantity source: drawings only. Reference quantities are for comparison only and do not contribute to cost or programme calculations.</p>
 <p>Contract BOQ rates take precedence. Cited processed-PVR rates are disclosed per line; they are not approved rates.</p>
 ${drawingNotes.length?'<p><strong>Drawing availability notes</strong></p><ul>'+drawingNotes.map(n=>'<li>'+e(n)+'</li>').join('')+'</ul>':''}
 ${input.blockers?.length?'<ul>'+input.blockers.map(b=>'<li>'+e(b)+'</li>').join('')+'</ul>':''}
 ${whatIf?'<p><strong>What-if scenario only (not PVR time impact):</strong> '+e(whatIf.input)+' · '+e(whatIf.activity)+' · '+e(whatIf.before)+' → '+e(whatIf.after)+' ('+e(whatIf.calendarDays)+' calendar days difference'+(whatIf.elapsedHours===undefined?'':', '+e(whatIf.elapsedHours)+' elapsed hours')+'). This does not verify contractual variation impact.</p>'+
 (whatIf.sourceSha256?'<p>Source XER SHA-256: '+e(whatIf.sourceSha256)+'</p>':'')+
-(whatIf.scopeAudit?.length?'<ul>'+whatIf.scopeAudit.map(x=>'<li>'+e(x.line)+' · '+e(x.outcome)+' · '+e(x.basis)+'</li>').join('')+'</ul>':''):''}
+(whatIf.scopeAudit?.length?'<ul>'+whatIf.scopeAudit.map(x=>'<li>'+e(x.line)+' · '+e(x.outcome)+' · '+e(x.basis)+'</li>').join('')+'</ul>':'')+
+(programmeAudit?'<p><strong>Unchanged XER check passed:</strong> '+e(programmeAudit.verifiedActivities)+' activity date pairs, '+e(programmeAudit.verifiedMilestones)+' milestone date pairs.</p>'+
+'<p><strong>Milestones with changed dates:</strong> '+e(programmeAudit.changedMilestones)+
+(programmeAudit.changedMilestones>programmeAudit.milestoneMovements.length?' (showing '+e(programmeAudit.milestoneMovements.length)+')':'')+'</p>'+
+(programmeAudit.milestoneMovements.length?'<ul>'+programmeAudit.milestoneMovements.map(m=>'<li>'+e(m.code)+': '+display(m.before)+' → '+e(m.after)+'</li>').join('')+'</ul>':'')+
+'<p><strong>Calculated driving ties:</strong> '+e(programmeAudit.drivingTieCount)+(programmeAudit.drivingTieCount>programmeAudit.drivingTies.length?' (showing '+e(programmeAudit.drivingTies.length)+')':'')+'</p>'+
+(programmeAudit.drivingTies.length?'<ul>'+programmeAudit.drivingTies.map(t=>'<li>'+e(t.from)+' → '+e(t.to)+' ('+e(t.type)+')</li>').join('')+'</ul>':''):''):''}
 <table><thead><tr><th>Scope / Activity</th><th>Drawing Takeoff</th><th>Unit Rate and Source</th><th>Cost Impact</th><th>Processed Quantity (Comparison Only)</th></tr></thead><tbody>${audit || '<tr><td colspan="5">No valuation lines available.</td></tr>'}</tbody></table>
 </div></body></html>`;
 }

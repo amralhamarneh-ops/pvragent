@@ -66,13 +66,16 @@ export default function StandaloneProgrammePanel({caseId,source,reference,scope,
   },[endpoint,source.docId,source.sha256,localCase]);
   const simulation=result?.simulation;
   useEffect(()=>{
-    onScenario?.(simulation?{before:simulation.before,after:simulation.after,calendarDays:simulation.calendarDays,input:source.fileName,sourceSha256:source.sha256,elapsedHours:simulation.elapsedHours,
+    onScenario?.(simulation && result?.control.ok?{before:simulation.before,after:simulation.after,calendarDays:simulation.calendarDays,input:source.fileName,sourceSha256:source.sha256,elapsedHours:simulation.elapsedHours,
       activity:[...review.changes,...review.fragments].map(x=>x.code).join(', '),
+      programmeAudit:{verifiedActivities:result.control.activities,verifiedMilestones:result.control.milestones,
+        changedMilestones:simulation.changedMilestones,milestoneMovements:simulation.milestones.map(m=>({code:m.code,before:m.before?.finish??null,after:m.after.finish})),
+        drivingTieCount:simulation.drivingTieCount,drivingTies:simulation.drivingTies},
       scopeAudit:review.review.map(({line,result})=>({line:line.name,basis:activeDecisions[line.id]?.basis??'',
         outcome:'entries' in result?result.entries.map(x=>`${x.quantity} ${line.unit} on ${x.code}: +${(x.minutes/60).toFixed(2)} working hours`).join('; ')+
           (result.anchor?` (new activity between ${result.anchor.from} and ${result.anchor.to})`:''):'Excluded from this scenario'}))}:null);
     return ()=>onScenario?.(null);
-  },[simulation,input,source.fileName,onScenario]); // An input change clears the result and export immediately.
+  },[simulation,result?.control,input,source.fileName,onScenario]); // An input change clears the result and export immediately.
   const rows=useMemo<GanttRow[]>(()=>{
     if(simulation) {
       const selected=new Set([...review.changes,...review.fragments].map(c=>c.code));

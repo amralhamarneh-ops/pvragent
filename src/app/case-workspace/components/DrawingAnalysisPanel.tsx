@@ -60,7 +60,19 @@ export default function DrawingAnalysisPanel({ scopeId, documents, narrative, ru
   const stopReplay = useCallback(() => { setReplaying(false); setRevealed(null); }, []);
 
   const restoredChanges: ReconciledChange[] = !out && snap && status?.current ? snap.changes : [];
-  const driveDrawings = usable.filter((d) => d.role === 'drawings').length;
+  const inputDrawings = usable.filter((d) => d.role === 'drawings');
+  const driveDrawings = inputDrawings.length;
+  // A reader labels extracted markup text explicitly. This is for review, never a geometry or quantity input.
+  const annotationDelimiter = '[PDF annotations; review against the sheet]\n';
+  const drawingPdfNames = new Set(inputDrawings.filter((d) => /\.pdf$/i.test(d.name)).map((d) => d.name));
+  const markups = (out?.documents ?? []).filter((doc) => doc.method === 'pdf-text' && drawingPdfNames.has(doc.name)).flatMap((doc) =>
+    doc.pages.flatMap((page) => {
+      const start = page.text.indexOf(annotationDelimiter);
+      if (start < 0) return [];
+      const notes = page.text.slice(start + annotationDelimiter.length).trim();
+      return notes ? [{ fileName: doc.name, page: page.page, notes }] : [];
+    }),
+  );
 
   return (
     <section aria-label="Drawing analysis" className="space-y-3">
@@ -97,6 +109,45 @@ export default function DrawingAnalysisPanel({ scopeId, documents, narrative, ru
           revealedLayers={replaying ? revealed : null}
           replaying={replaying}
         />
+      ) : null}
+
+      {out && run.status === 'complete' && !out.cancelled ? (
+        <section aria-label="Drawing processing evidence" className="space-y-3 rounded-lg border border-border bg-card p-4 shadow-sm">
+          <h3 className="text-base font-semibold text-foreground">Drawing processing evidence</h3>
+          <p className="text-sm text-muted-foreground">See which revisions were compared, what the reader could verify, and which inputs are held for review.</p>
+          {out.files.length > 0 ? (
+            <details>
+              <summary className="cursor-pointer text-sm font-semibold">Files read and checks ({out.files.length})</summary>
+              <ul className="mt-2 divide-y divide-border text-sm">{out.files.map((file, i) => (
+                <li key={i} className="py-2">
+                  <span className="font-medium">{file.fileName}</span>
+                  <span className="ml-2 text-muted-foreground">{file.role} · {file.stateLabel}</span>
+                  <p className="text-xs text-muted-foreground">{file.detail}</p>
+                </li>
+              ))}</ul>
+            </details>
+          ) : null}
+          {out.events.length > 0 ? (
+            <details>
+              <summary className="cursor-pointer text-sm font-semibold">Processing steps ({out.events.length})</summary>
+              <ol className="mt-2 max-h-64 list-decimal space-y-1 overflow-auto pl-5 text-sm text-muted-foreground">
+                {out.events.map((event, i) => <li key={i}><span className="font-medium text-foreground">{event.step}</span> · {event.detail}</li>)}
+              </ol>
+            </details>
+          ) : null}
+          {markups.length > 0 ? (
+            <details open>
+              <summary className="cursor-pointer text-sm font-semibold">PDF drawing markups ({markups.length} pages)</summary>
+              <p className="mt-1 text-xs text-muted-foreground">Markup text is shown with its source page. It is not measured geometry and does not verify quantities.</p>
+              <ul aria-label="PDF drawing markups" className="mt-2 max-h-72 space-y-2 overflow-auto">
+                {markups.map(({fileName, page, notes}, i) => <li key={i} className="rounded-md border border-border p-2 text-sm">
+                  <p className="font-medium">{fileName} · p.{page}</p>
+                  <p className="mt-1 whitespace-pre-wrap break-words text-muted-foreground">{notes}</p>
+                </li>)}
+              </ul>
+            </details>
+          ) : null}
+        </section>
       ) : null}
 
       {!out && restoredChanges.length > 0 ? (
