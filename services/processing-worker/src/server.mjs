@@ -80,6 +80,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (!authed(req)) return json(res, TOKEN ? 401 : 503, { error: TOKEN ? 'Unauthorised.' : 'WORKER_API_TOKEN is not configured on the worker.' });
 
+    if (req.method === 'POST' && url.pathname === '/schedule/cpm/v2') return await scheduleCpmRoute(req,res,json,2);
     if (req.method === 'POST' && url.pathname === '/schedule/cpm') return await scheduleCpmRoute(req,res,json);
 
     // Functional tests (authenticated, no persistence): run a REAL operation on supplied bytes and report what happened.

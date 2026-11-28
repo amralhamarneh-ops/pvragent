@@ -1,5 +1,5 @@
-export type GanttDates = {start:string;finish:string;floatHours?:number|null;critical?:boolean};
-export type GanttRow = {code:string;name:string;milestone?:boolean;before?:GanttDates;after?:GanttDates};
+export type GanttDates = {start:string;finish:string;floatHours?:number|null;critical?:boolean;remainingHours?:number|null};
+export type GanttRow = {code:string;name:string;milestone?:boolean;driving?:boolean;before?:GanttDates;after?:GanttDates};
 export const finiteDate = (s?:string) => {
   if (!s || !/^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?)?$/.test(s.trim())) return null;
   const t=Date.parse(s.trim().replace(' ','T')+(s.trim().length===10?'T00:00:00Z':'Z'));

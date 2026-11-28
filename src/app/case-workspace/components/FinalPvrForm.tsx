@@ -33,8 +33,8 @@ export default function FinalPvrForm({caseId,title,lines,reportReady,whatIf,bloc
   const ready=reportReady && identification;
   const formBlockers=useMemo(()=>[...(!identification?['Complete the project name, contract number, PVR number and title to prepare a final form.']:[]),...(blockers??[])],[identification,blockers]);
   const html=async()=>{
-    const stale=ready && !(await verifyDrawingRevisions());
-    return renderPvrForm({details,lines,references:refs,reportReady:ready&&!stale,whatIf,drawingNotes,blockers:stale
+    const stale=(ready || !!whatIf) && !(await verifyDrawingRevisions());
+    return renderPvrForm({details,lines,references:refs,reportReady:ready&&!stale,whatIf:stale?null:whatIf,drawingNotes,blockers:stale
       ? [...formBlockers,'The source drawing revisions have changed or are unavailable. Rerun the takeoff before using these results.']
       : formBlockers});
   };

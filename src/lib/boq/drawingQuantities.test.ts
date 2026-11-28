@@ -3,6 +3,7 @@ import { analyseDocuments } from '../drawings/analyse';
 import { buildHandoff } from '../drawings/handoff';
 import { classifyOne } from '../intake/triage';
 import { outcomeOf, runAgent } from './agentClient';
+import { drawingProgrammeScope } from '../mapping/drawingProgrammeScope';
 import { withDrawingQuantities } from './drawingQuantities';
 import { buildImport, confirmImport, stageUpload } from './importFlow';
 import { EMPTY_ANSWERS } from './matchEngine';
@@ -103,4 +104,13 @@ it('uses both revisions to value a measured relocation as rework, not an omissio
   const result = withDrawingQuantities({ ...scope, components: [] }, { ...h, changes: [moved] }, docs);
   expect(result.components).toHaveLength(1);
   expect(result.components[0]).toMatchObject({ action: 'rework', quantity: { value: '12', origin: 'measured_from_geometry' } });
+});
+
+it('carries measured scope into the programme before BOQ confirmation and holds stale evidence', async () => {
+  const h=await measuredHandoff();
+  const noBoq=drawingProgrammeScope(h,'AED',docs);
+  expect(noBoq.lines.find(l=>l.work.quantity==='12')).toMatchObject({origin:'scope_only',priced:false,work:{executes:true,unit:'m',quantity:'12'}});
+  const stale=drawingProgrammeScope(h,'AED',[docs[0],{...docs[1],version:2}]);
+  expect(stale.lines.every(l=>l.work.quantity===null)).toBe(true);
+  expect(stale.lines.some(l=>l.work.executes)).toBe(true);
 });
