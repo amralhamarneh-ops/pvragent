@@ -96,14 +96,22 @@ async function confirmedImport(caseId: string) {
 }
 
 describe('verifyUser', () => {
-  it('falls back to the shared guest when no valid session is sent, and honours a valid one', async () => {
+  it('uses the shared guest only when no user session is supplied and never downgrades invalid sessions', async () => {
     const s = makeServer();
     await withFetch(s.fetchImpl as typeof fetch, async () => {
       await expect(verifyUser(null, URL_, ANON)).resolves.toMatchObject({ id: GUEST_USER_ID, token: ANON });
-      await expect(verifyUser('Basic abc', URL_, ANON)).resolves.toMatchObject({ id: GUEST_USER_ID });
-      await expect(verifyUser('Bearer forged', URL_, ANON)).resolves.toMatchObject({ id: GUEST_USER_ID });
+      await expect(verifyUser('Basic abc', URL_, ANON)).rejects.toMatchObject({ status: 401 });
+      await expect(verifyUser('Bearer forged', URL_, ANON)).rejects.toMatchObject({ status: 401 });
       const u = await verifyUser('Bearer token-alice', URL_, ANON);
       expect(u).toMatchObject({ id: 'alice', token: 'token-alice' });
+    });
+  });
+  it('reports a Supabase Auth outage instead of routing requests to guest', async () => {
+    await withFetch(async () => { throw new Error('offline'); }, async () => {
+      await expect(verifyUser('Bearer token-alice', URL_, ANON)).rejects.toMatchObject({ kind: 'network' });
+    });
+    await withFetch(async () => new Response('unavailable', { status: 503 }), async () => {
+      await expect(verifyUser('Bearer token-alice', URL_, ANON)).rejects.toMatchObject({ kind: 'rejected' });
     });
   });
 });

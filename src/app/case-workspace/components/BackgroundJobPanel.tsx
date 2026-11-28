@@ -38,7 +38,12 @@ export default function BackgroundJobPanel({ caseId }: Props) {
   jobRef.current = jobId;
 
   useEffect(() => { setNow(Date.now()); const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t); }, []);
-  useEffect(() => { void jobsApi.worker().then((r) => { if (r.ok) setWorker(r.data); }); }, []);
+  const checkWorker = useCallback(async () => {
+    setWorker(null);
+    const r = await jobsApi.worker();
+    setWorker(r.ok ? r.data : { ready: false, reason: r.error });
+  }, []);
+  useEffect(() => { if (caseId && !caseId.startsWith('session-')) void checkWorker(); }, [caseId, checkWorker]);
 
   // Reconnect: load the case's jobs and attach to the newest one, whatever state it is in.
   useEffect(() => {
@@ -128,11 +133,11 @@ export default function BackgroundJobPanel({ caseId }: Props) {
     return Object.fromEntries(Object.entries(geo[sel.docId].layers).filter(([k]) => keep.has(k)));
   }, [sel, geo, replay, replayCount, selLayerOrder]);
 
-  const connected = worker?.mode === 'remote';
-  const canRun = !!caseId && !caseId.startsWith('session-') && !busy && !(state && isActive(state));
+  const ready = worker?.ready === true;
+  const canRun = ready && !!caseId && !caseId.startsWith('session-') && !busy && !(state && isActive(state));
   const canStop = !!state && (state === 'queued' || state === 'running');
-  const canResume = !!state && (state === 'stopped' || state === 'failed' || state === 'partial');
-  const canRetry = !!state && !isActive(state) && (prog?.failed ?? 0) > 0;
+  const canResume = ready && !!state && (state === 'stopped' || state === 'failed' || state === 'partial');
+  const canRetry = ready && !!state && !isActive(state) && (prog?.failed ?? 0) > 0;
 
   return (
     <section aria-label="Background processing" className="space-y-3 rounded-lg border border-border bg-card p-4 shadow-sm">
@@ -149,8 +154,12 @@ export default function BackgroundJobPanel({ caseId }: Props) {
         </div>
       </div>
 
-      {worker && !connected ? (
-        <p role="status" className="flex items-start gap-2 rounded-md border border-warning bg-warning/10 px-3 py-2 text-sm text-foreground"><AlertTriangle size={16} className="mt-0.5 shrink-0" aria-hidden /><span><span className="font-semibold">Processing worker not connected.</span> PROCESSING_WORKER_URL is not configured, so no worker is attached. Jobs are saved in the database queue and will wait there; nothing will run them until the worker in <code>services/processing-worker</code> is deployed with the same database credentials. They are not lost and will start when a worker connects.</span></p>
+      {caseId && !caseId.startsWith('session-') && !ready ? (
+        <div role="status" className="flex items-start gap-2 rounded-md border border-warning bg-warning/10 px-3 py-2 text-sm text-foreground">
+          <AlertTriangle size={16} className="mt-0.5 shrink-0" aria-hidden />
+          <span>{worker?.reason ?? 'Checking the connection between Supabase and the processing worker…'}</span>
+          {worker ? <button type="button" onClick={() => void checkWorker()} className="underline">Check again</button> : null}
+        </div>
       ) : null}
       {!caseId || caseId.startsWith('session-') ? <p role="status" className="rounded-md border border-border bg-muted px-3 py-2 text-sm text-muted-foreground">Background processing needs a case saved on the server. This case is held in this browser only, so it cannot be processed in the background.</p> : null}
       {err ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">{err}</p> : null}

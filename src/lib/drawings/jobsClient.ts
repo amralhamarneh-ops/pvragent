@@ -10,7 +10,7 @@ async function headers(): Promise<Record<string, string>> {
 }
 
 export interface JobSnapshot { job: JobRow; tasks: (TaskRow & { result?: TaskResult })[]; events: EventRow[]; serverTime: string }
-export interface WorkerSummary { mode: 'remote' | 'not_connected'; workerUrlConfigured: boolean; workerTokenConfigured: boolean }
+export interface WorkerSummary { ready: boolean; reason: string | null }
 type Failure = { ok: false; error: string; status: number };
 type Ok<T> = { ok: true; data: T };
 
@@ -26,7 +26,7 @@ async function call<T>(url: string, init?: RequestInit): Promise<Ok<T> | Failure
 const post = <T,>(b: Record<string, unknown>) => call<T>('/api/processing/jobs', { method: 'POST', body: JSON.stringify(b) });
 
 export const jobsApi = {
-  worker: () => call<WorkerSummary>('/api/processing/jobs'),
+  worker: () => call<WorkerSummary>('/api/processing/jobs?readiness=1'),
   list: (caseId: string) => call<{ jobs: JobRow[] }>(`/api/processing/jobs?caseId=${encodeURIComponent(caseId)}`),
   get: (caseId: string, jobId: string, since = 0, results = false) => call<JobSnapshot>(`/api/processing/jobs?caseId=${encodeURIComponent(caseId)}&jobId=${encodeURIComponent(jobId)}&since=${since}${results ? '&results=1' : ''}`),
   run: (caseId: string, runId: string, docIds?: string[]) => post<{ jobId: string; state: string; duplicate: boolean; tasks?: number; skipped: { docId: string; fileName: string; reason: string }[] }>({ action: 'run', caseId, runId, docIds }),
