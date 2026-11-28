@@ -673,12 +673,12 @@ export class SupabaseRestStore implements CaseStore {
     return r ? { narrative: r.narrative, handoff: r.handoff, answers: r.answers ?? {}, updatedAt: r.updated_at } : null;
   }
 
-  async saveEvidence(caseId: string, e: { narrative?: string; handoff?: unknown; answers?: Record<string, string>; matchSnapshot?: string }): Promise<CaseEvidenceRecord> {
+  async saveEvidence(caseId: string, e: { narrative?: string; handoff?: unknown; answers?: Record<string, string>; matchSnapshot?: string; programmeSnapshot?: string }): Promise<CaseEvidenceRecord> {
     await this.ownedCase(caseId);
     const filter = `case_id=eq.${encodeURIComponent(caseId)}&owner_id=eq.${encodeURIComponent(this.user.id)}`;
     for (let attempt = 0; attempt < 4; attempt += 1) {
       const existing = await this.getEvidence(caseId);
-      const answers = mergeMatchSnapshotAnswers(existing?.answers ?? {}, e.answers, e.matchSnapshot);
+      const answers = mergeMatchSnapshotAnswers(existing?.answers ?? {}, e.answers, e.matchSnapshot, e.programmeSnapshot);
       const merged = { narrative: e.narrative ?? existing?.narrative ?? '', handoff: e.handoff !== undefined ? e.handoff : existing?.handoff ?? null, answers };
       // Compare-and-set so a saved preview and a concurrent case edit do not erase each other.
       const updatedAt = new Date(Math.max(Date.now(), existing ? Date.parse(existing.updatedAt) + 1 : 0)).toISOString();

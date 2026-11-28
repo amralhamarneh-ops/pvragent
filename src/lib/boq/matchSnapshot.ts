@@ -1,3 +1,4 @@
+import { PROGRAMME_SNAPSHOT_KEY } from '../assessment/programmeSnapshot';
 import type { AssessmentOutcome } from './matchEngine';
 import type { DrawingDocument } from './drawingQuantities';
 
@@ -46,12 +47,15 @@ export function readMatchSnapshot(raw: unknown): MatchSnapshot | null {
 }
 
 /** Preserve reserved data on ordinary answer updates; a snapshot-only save must never remove unrelated answers. */
-export function mergeMatchSnapshotAnswers(current: Record<string, string>, answers?: Record<string, string>, snapshot?: string): Record<string, string> {
+export function mergeMatchSnapshotAnswers(current: Record<string, string>, answers?: Record<string, string>, snapshot?: string, programmeSnapshot?: string): Record<string, string> {
   const next = { ...(answers ?? current) };
   const has = (o: Record<string, string>, key: string) => Object.prototype.hasOwnProperty.call(o, key);
   if (answers && !has(answers, '__boqInclusion') && has(current, '__boqInclusion')) next.__boqInclusion = current.__boqInclusion;
   if (snapshot !== undefined) next[MATCH_SNAPSHOT_KEY] = snapshot;
   else if (has(current, MATCH_SNAPSHOT_KEY)) next[MATCH_SNAPSHOT_KEY] = current[MATCH_SNAPSHOT_KEY];
   else delete next[MATCH_SNAPSHOT_KEY];
+  if (programmeSnapshot !== undefined) next[PROGRAMME_SNAPSHOT_KEY] = programmeSnapshot;
+  else if (has(current, PROGRAMME_SNAPSHOT_KEY)) next[PROGRAMME_SNAPSHOT_KEY] = current[PROGRAMME_SNAPSHOT_KEY];
+  else delete next[PROGRAMME_SNAPSHOT_KEY];
   return next;
 }
