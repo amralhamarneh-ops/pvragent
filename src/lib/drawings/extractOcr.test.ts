@@ -15,10 +15,11 @@ function mixedPdf() {
   const objs=[
     Buffer.from('<< /Type /Catalog /Pages 2 0 R >>'),
     Buffer.from('<< /Type /Pages /Kids [3 0 R] /Count 1 >>'),
-    Buffer.from('<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 460] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> /XObject << /Im0 6 0 R >> >> >>'),
+    Buffer.from('<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 460] /Contents 4 0 R /Annots [7 0 R] /Resources << /Font << /F1 5 0 R >> /XObject << /Im0 6 0 R >> >> >>'),
     Buffer.from(`<< /Length ${ops.length} >>\nstream\n${ops}\nendstream`),
     Buffer.from('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>'),
     Buffer.concat([Buffer.from(`<< /Type /XObject /Subtype /Image /Width 960 /Height 600 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpg.length} >>\nstream\n`),jpg,Buffer.from('\nendstream')]),
+    Buffer.from('<< /Type /Annot /Subtype /FreeText /Rect [35 30 180 55] /Contents (Additional radar detector at junction) /DA (/Helv 10 Tf 0 g) >>'),
   ];
   const chunks=[Buffer.from('%PDF-1.4\n')];let offset=chunks[0].length;
   const offsets=objs.map((b,i)=>{const obj=Buffer.concat([Buffer.from(`${i+1} 0 obj\n`),b,Buffer.from('\nendobj\n')]);chunks.push(obj);const p=offset;offset+=obj.length;return p;});
@@ -38,6 +39,7 @@ describe('offline evidence OCR',()=>{
     expect(d.truncated).toBe(false);
     expect(d.pages[0].text).toMatch(/IRRIGATION PIPE DRAWING/i);
     expect(d.pages[0].text).toMatch(/Digital archive watermark/i);
+    expect(d.pages[0].text).toMatch(/PDF annotations[\s\S]*Additional radar detector at junction/i);
     expect(d.limitation).toContain('not used for geometric measurement');
   },25000);
   it('preserves native text and reports the scan as partial when the rasterizer is unavailable',async()=>{
@@ -46,6 +48,7 @@ describe('offline evidence OCR',()=>{
       const d=await extractPdf('drawing.pdf',mixedPdf());
       expect(d.truncated).toBe(true);
       expect(d.pages[0].text).toMatch(/Digital archive watermark/i);
+    expect(d.pages[0].text).toMatch(/PDF annotations[\s\S]*Additional radar detector at junction/i);
       expect(d.pages[0].text).not.toMatch(/PROPOSED RELOCATION/i);
       expect(d.limitation).toMatch(/Poppler is not installed/);
     } finally { vi.unstubAllEnvs(); }

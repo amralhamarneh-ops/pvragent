@@ -150,13 +150,30 @@ export function interpretSheetAuto(sheet: RawSheet): SheetInterpretation {
     });
   }
 
+  // Bills can use a repeated letter as ITEM and put the contractual code in a two-line CESMM/SMM Ref column.
+  // Only prefer that column when the explicit lower header and plausible code values both exist.
+  let dataAfter = best.rowNumber;
+  const top = sheet.rows.find((r) => r.rowNumber === best!.rowNumber);
+  const lower = sheet.rows.find((r) => r.rowNumber === best!.rowNumber + 1);
+  if (top && lower && columns.ref !== null && /^item$/i.test(norm(top.cells[columns.ref]?.text ?? ''))) {
+    const codeCols = top.cells.flatMap((c, idx) => {
+      const label = norm(c.text);
+      const below = norm(lower.cells[idx]?.text ?? '');
+      const stat = colStats(sheet.rows, lower.rowNumber, idx);
+      return /^(?:CESMM|SMM)(?:\s*\d+)?$/i.test(label)
+        && /^ref(?:erence)?\.?$/i.test(below)
+        && stat.refLike >= 2 && fieldFit('ref', stat) > 0.5 ? [idx] : [];
+    });
+    if (codeCols.length === 1) { columns.ref = codeCols[0]; dataAfter = lower.rowNumber; }
+  }
+
   // Fill fields the header did not name, using the data.
-  const fromData = inferFromData(sheet, best.rowNumber, columns);
+  const fromData = inferFromData(sheet, dataAfter, columns);
   for (const f of MAPPED_FIELDS) if (columns[f] === null && fromData[f] !== null) columns[f] = fromData[f];
 
   const hRow = sheet.rows.find((r) => r.rowNumber === best!.rowNumber) ?? null;
-  const mapping: SheetMapping = { sheet: sheet.name, included: true, headerRow: best.rowNumber, columns };
-  return finish(sheet, mapping, `Header row ${best.rowNumber} recognised.`, ambiguities, hRow ? { rowNumber: hRow.rowNumber, cells: hRow.cells.map((c) => ({ address: c.address, text: c.text })) } : null);
+  const mapping: SheetMapping = { sheet: sheet.name, included: true, headerRow: dataAfter, columns };
+  return finish(sheet, mapping, dataAfter === best.rowNumber ? `Header row ${best.rowNumber} recognised.` : `Header rows ${best.rowNumber}-${dataAfter} recognised; using the measurement standard reference.`, ambiguities, hRow ? { rowNumber: hRow.rowNumber, cells: hRow.cells.map((c) => ({ address: c.address, text: c.text })) } : null);
 }
 
 function fieldFit(f: MappedField, s: ReturnType<typeof colStats>): number {
