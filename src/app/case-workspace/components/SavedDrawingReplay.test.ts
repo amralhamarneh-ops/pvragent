@@ -35,6 +35,10 @@ it('shows the current real-run drawing sheet as well as the saved assessment pre
     scopeId: caseId, documents: files, narrative: '', run, out, streamGeometry: true,
     onStreamGeometry: noop, onStart: noop, onCancel: noop,
   }));
+  expect(liveComplete).toContain('Drawing processing evidence');
+  expect(liveComplete).toContain('Files read and checks');
+  expect(liveComplete).toContain('TEST-CIV-101 Rev B.dxf');
+  expect(liveComplete).toContain('Processing steps');
   const saved = renderToStaticMarkup(createElement(SavedDrawingReplay, {replay: replay!, changes: out.changes, showSheets:true}));
   for (const html of [liveComplete, saved]) {
     const svgs = [...html.matchAll(/<svg[^>]*viewBox="([^"]+)"[^>]*>(.*?)<\/svg>/g)].filter(([svg])=>svg.includes('full drawing with numbered red change boxes'));
@@ -45,4 +49,22 @@ it('shows the current real-run drawing sheet as well as the saved assessment pre
     expect(html).toContain('Replay completed processing');
   }
   expect(out.changes.find(c=>c.component==='GUARD RAIL')).toMatchObject({unit:'m',addedQty:'12'});
+});
+
+it('shows page-linked native PDF notes as text evidence without claiming that they are vector quantities', async () => {
+  const name = 'TEST-ITS.pdf';
+  const doc = { name, bytes: new TextEncoder().encode('%PDF-1.7'), id: 'pdf', role: 'drawings' as const, sha256: 'c'.repeat(64) };
+  const caseId = 'test-pdf', runId = 'pdf-run';
+  const out = await analyseDocuments({ files:[doc], narrative:'', runId, caseId });
+  out.documents = [{name, method:'pdf-text', pages:[{page:17, text:'Drawing header '.repeat(36) + '\n[PDF annotations; review against the sheet]\nTentative detector relocation'}], truncated:false, limitation:''}];
+  const run = runReducer(runReducer(initialRun(), {type:'start', runId, caseId, at:0}), {type:'complete', runId, caseId});
+  const html = renderToStaticMarkup(createElement(DrawingAnalysisPanel, {
+    scopeId:caseId, documents:[doc], narrative:'', run, out, streamGeometry:false,
+    onStreamGeometry:noop, onStart:noop, onCancel:noop,
+  }));
+  expect(html).toContain('PDF drawing markups');
+  expect(html).toContain('TEST-ITS.pdf · p.17');
+  expect(html).toContain('Tentative detector relocation');
+  expect(html).toContain('does not verify quantities');
+  expect(html).not.toContain('full drawing with numbered red change boxes');
 });

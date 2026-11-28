@@ -51,6 +51,23 @@ describe('final PVR form and distinct benchmark data',()=>{
     expect(html.match(/Issued plot p.4 refers/g)).toHaveLength(1);
     expect(html).toContain('Pending independent programme assessment');
   });
+  it('withholds stale partial quantities, subtotal, mappings, and what-if; keeps the reference separate',()=>{
+    const html=renderPvrForm({...base,reportReady:false,drawingEvidenceCurrent:false,
+      references:{'line-1':{value:'10',unit:'m',citation:'Reference citation'}}});
+    for(const value of ['AED 325.00','Sheet 05 Rev C','TEST-100','What-if scenario only']) expect(html).not.toContain(value);
+    expect(html).toContain('Drawing revisions were not verified at export');expect(html).toContain('Reference citation');
+    expect(html).toContain('Not comparable');
+  });
+  it('prints the validated programme audit in the annex only and escapes activity codes',()=>{
+    const html=renderPvrForm({...base,whatIf:{...base.whatIf!,programmeAudit:{verifiedActivities:12,verifiedMilestones:3,
+      changedMilestones:2,milestoneMovements:[{code:'<M-01>',before:'2026-01-01',after:'2026-01-04'}],
+      drivingTieCount:1,drivingTies:[{from:'TEST-100',to:'M-01',type:'FS'}]}}});
+    const [form,annex]=html.split('<div class="annex">');
+    expect(form).not.toContain('Unchanged XER check passed');expect(form).toContain('Pending independent programme assessment');
+    expect(annex).toContain('12 activity date pairs, 3 milestone date pairs.');
+    expect(annex).toContain('2 (showing 1)');expect(annex).toContain('&lt;M-01&gt;: 2026-01-01 → 2026-01-04');
+    expect(annex).toContain('TEST-100 → M-01 (FS)');
+  });
   it('only calculates a delta for equivalent explicit units and with independent citation',()=>{
     expect(compareTakeoff(line,{value:'10',unit:'m2',citation:'p.1'})).toBeNull();
     expect(compareTakeoff(line,{value:'10',unit:'m',citation:''})).toBeNull();
