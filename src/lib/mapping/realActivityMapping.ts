@@ -462,6 +462,11 @@ export interface MappingUserChoice {
 
 export type MappingChoices = Record<string, MappingUserChoice>;
 
+export function cannotAssignProgrammeWork(line: WorkLine, activity: ScheduleActivity) {
+  const brief=briefOf(activity);
+  return cannotReceiveExecution(brief) ?? evidenceFor(line,activity).violations[0] ?? (brief.status==='completed'?'Already completed.':null);
+}
+
 const HIGH = 3.6;
 const MED = 2.2;
 

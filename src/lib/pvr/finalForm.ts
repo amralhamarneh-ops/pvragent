@@ -26,7 +26,7 @@ export interface FormLine extends TotalsLine {
   rateFallback:boolean;
   mappedActivity?:string;
 }
-export interface ProgrammeWhatIf {before:string; after:string; calendarDays:number; input:string; activity:string}
+export interface ProgrammeWhatIf {before:string; after:string; calendarDays:number; input:string; activity:string;sourceSha256?:string;elapsedHours?:number;scopeAudit?:{line:string;basis:string;outcome:string}[]}
 export interface FormInput {
   details:FormDetails; lines:FormLine[]; references?:Record<string,TakeoffReference>;
   reportReady:boolean; whatIf?:ProgrammeWhatIf|null; blockers?:string[]; drawingNotes?:string[];
@@ -59,7 +59,7 @@ export function renderPvrForm(input:FormInput):string {
   const pricing=totals.perCurrency.filter(t=>t.pricedSubtotal!==null).map(t=>money(t.pricedSubtotal!,t.currency)).join(' / ');
   const cost=pendingCost ? 'Pending verification'+(pricing?' (priced subtotal only: '+pricing+')':'') : pricing;
   const scopedCost=exclusions ? cost+' (excludes the scope noted below)' : cost;
-  // The current scenario tool accepts manually entered working days. It has no full-scope result suitable for official reporting.
+  // A reviewed scenario is shown in the annex only. Official programme and entitlement decisions remain separate.
   const timeText='Pending independent programme assessment';
   const commitment = /^\d{4}-\d{2}-\d{2}$/.test(d.clientCommitment??'') ? d.clientCommitment : null;
   const timeChoice = ['No Time Impact','Within Client Commitment Date','Delay to Client Commitment Date'].map(label => check(false)+' '+label).join('　　');
@@ -105,7 +105,9 @@ ${section('APPROVALS')}<table class="approval"><thead><tr><th style="width:13%">
 <p>Contract BOQ rates take precedence. Cited processed-PVR rates are disclosed per line; they are not approved rates.</p>
 ${drawingNotes.length?'<p><strong>Drawing availability notes</strong></p><ul>'+drawingNotes.map(n=>'<li>'+e(n)+'</li>').join('')+'</ul>':''}
 ${input.blockers?.length?'<ul>'+input.blockers.map(b=>'<li>'+e(b)+'</li>').join('')+'</ul>':''}
-${whatIf?'<p><strong>What-if scenario only (not PVR time impact):</strong> '+e(whatIf.input)+' · '+e(whatIf.activity)+' · '+e(whatIf.before)+' → '+e(whatIf.after)+' ('+e(whatIf.calendarDays)+' calendar days difference). Duration input was entered manually; the variation impact has not been verified.</p>':''}
+${whatIf?'<p><strong>What-if scenario only (not PVR time impact):</strong> '+e(whatIf.input)+' · '+e(whatIf.activity)+' · '+e(whatIf.before)+' → '+e(whatIf.after)+' ('+e(whatIf.calendarDays)+' calendar days difference'+(whatIf.elapsedHours===undefined?'':', '+e(whatIf.elapsedHours)+' elapsed hours')+'). This does not verify contractual variation impact.</p>'+
+(whatIf.sourceSha256?'<p>Source XER SHA-256: '+e(whatIf.sourceSha256)+'</p>':'')+
+(whatIf.scopeAudit?.length?'<ul>'+whatIf.scopeAudit.map(x=>'<li>'+e(x.line)+' · '+e(x.outcome)+' · '+e(x.basis)+'</li>').join('')+'</ul>':''):''}
 <table><thead><tr><th>Scope / Activity</th><th>Drawing Takeoff</th><th>Unit Rate and Source</th><th>Cost Impact</th><th>Processed Quantity (Comparison Only)</th></tr></thead><tbody>${audit || '<tr><td colspan="5">No valuation lines available.</td></tr>'}</tbody></table>
 </div></body></html>`;
 }
