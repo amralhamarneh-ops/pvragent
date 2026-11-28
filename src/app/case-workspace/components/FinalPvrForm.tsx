@@ -12,7 +12,7 @@ const selectOptions: Partial<Record<typeof DETAILS[number][0],string[]>> = {
 const fieldClass = 'w-full rounded border border-input bg-card px-2 py-1.5 text-foreground';
 const EMPTY_REFERENCE:TakeoffReference={value:'',unit:'',citation:''};
 
-export default function FinalPvrForm({caseId,title,lines,reportReady,whatIf,blockers,verifyDrawingRevisions}:Props) {
+export default function FinalPvrForm({caseId,title,lines,reportReady,whatIf,blockers,drawingNotes,verifyDrawingRevisions}:Props) {
   const [details,setDetails]=useState<FormDetails>({});
   const [refs,setRefs]=useState<Record<string,TakeoffReference>>({});
   const [loaded,setLoaded]=useState(false);
@@ -33,8 +33,8 @@ export default function FinalPvrForm({caseId,title,lines,reportReady,whatIf,bloc
   const ready=reportReady && identification;
   const formBlockers=useMemo(()=>[...(!identification?['Complete the project name, contract number, PVR number and title to prepare a final form.']:[]),...(blockers??[])],[identification,blockers]);
   const html=async()=>{
-    const stale=ready && !(await verifyDrawingRevisions());
-    return renderPvrForm({details,lines,references:refs,reportReady:ready&&!stale,whatIf,blockers:stale
+    const stale=(ready || !!whatIf) && !(await verifyDrawingRevisions());
+    return renderPvrForm({details,lines,references:refs,reportReady:ready&&!stale,whatIf:stale?null:whatIf,drawingNotes,blockers:stale
       ? [...formBlockers,'The source drawing revisions have changed or are unavailable. Rerun the takeoff before using these results.']
       : formBlockers});
   };
@@ -66,6 +66,11 @@ export default function FinalPvrForm({caseId,title,lines,reportReady,whatIf,bloc
       <div className="grid gap-2 mt-3 sm:grid-cols-2 lg:grid-cols-3">{DETAILS.slice(0,9).map(([k,label])=><label key={k} className={(k==='description'||k==='reasoning'?'sm:col-span-2 lg:col-span-3 ':'')+'block text-sm'}>
         {label}{(k==='description'||k==='reasoning')?<textarea className={fieldClass} rows={2} value={details[k]??''} onChange={ev=>setField(k,ev.target.value)}/>:<input className={fieldClass} value={details[k]??''} onChange={ev=>setField(k,ev.target.value)}/>}
       </label>)}</div>
+      <label className="mt-3 block text-sm">Scope excluded from this assessment
+        <textarea className={fieldClass} rows={2} value={details.scopeExclusions??''}
+          onChange={ev=>setDetails(d=>({...d,scopeExclusions:ev.target.value}))}
+          placeholder="Name the omitted scope, the missing source and why it is not quantified or priced." />
+      </label>
     </details>
     <details className="rounded border border-input p-3"><summary className="cursor-pointer font-medium">Change reason, budget and recommendations</summary>
       <fieldset className="flex flex-wrap gap-3 mt-2 text-sm"><legend>Change reason (select all that apply)</legend>{REASONS.map(r=><label key={r}><input type="checkbox" checked={details.reasons?.includes(r)??false} onChange={ev=>{const checked=ev.target.checked;setDetails(d=>({...d,reasons:checked?[...(d.reasons??[]),r]:(d.reasons??[]).filter(x=>x!==r)}));}}/> {r}</label>)}</fieldset>
@@ -74,6 +79,9 @@ export default function FinalPvrForm({caseId,title,lines,reportReady,whatIf,bloc
         <input className={fieldClass} type={k==='clientCommitment'?'date':'text'} value={details[k]??''} onChange={ev=>setField(k,ev.target.value)}/>}
       </label>)}</div>
     </details>
+    {!!drawingNotes?.length && <details className="rounded border border-input p-3"><summary className="cursor-pointer font-medium">Drawing availability notes (included in export)</summary>
+      <ul className="list-disc pl-5 text-sm">{drawingNotes.map(note=><li key={note}>{note}</li>)}</ul>
+    </details>}
     {lines.length>0 && <details className="rounded border border-input p-3"><summary className="cursor-pointer font-medium">Compare quantities against the processed PVR</summary>
       <p className="text-sm text-muted-foreground mb-2">Enter a reference value and citation for the equivalent scope. These values never feed pricing or the schedule.</p>
       <div className="divide-y divide-border max-h-96 overflow-auto">{lines.map(l=>{const ref=refs[l.lineId]??EMPTY_REFERENCE;const delta=compareTakeoff(l,ref);

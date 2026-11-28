@@ -42,6 +42,15 @@ describe('final PVR form and distinct benchmark data',()=>{
     expect(html).toContain('Pending independent programme assessment');
     expect(html).not.toContain('<script>');expect(html).toContain('&lt;script&gt;');
   });
+  it('prints scope exclusions and missing drawing references without adding an amount or delay',()=>{
+    const html=renderPvrForm({...base,details:{...base.details,scopeExclusions:'Spare duct excluded because the issued alignment is missing. <test>'},
+      drawingNotes:['Issued plot p.4 refers to an unavailable CAD sheet.','Issued plot p.4 refers to an unavailable CAD sheet.']});
+    expect(html).toContain('AED 325.00 (excludes the scope noted below)');
+    expect(html).toContain('Scope excluded from this assessment');
+    expect(html).toContain('Spare duct excluded because the issued alignment is missing. &lt;test&gt;');
+    expect(html.match(/Issued plot p.4 refers/g)).toHaveLength(1);
+    expect(html).toContain('Pending independent programme assessment');
+  });
   it('only calculates a delta for equivalent explicit units and with independent citation',()=>{
     expect(compareTakeoff(line,{value:'10',unit:'m2',citation:'p.1'})).toBeNull();
     expect(compareTakeoff(line,{value:'10',unit:'m',citation:''})).toBeNull();

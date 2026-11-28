@@ -25,6 +25,13 @@ export interface ServerDoc {
 export interface StoreOutcome { id: string; path: string; stored: boolean; error: string }
 
 const isSession = (caseId: string) => caseId.startsWith('session-');
+const scheduleManifestKey = (caseId: string) => `pvr-case-schedule-preview-manifest:${caseId}`;
+const previewManifestKey = (caseId: string) => `pvr-case-drawing-preview-manifest:${caseId}`;
+function clearTemporaryPreviewManifest(caseId: string) {
+  if (!isSession(caseId)) return;
+  try { window.sessionStorage.removeItem(previewManifestKey(caseId)); window.sessionStorage.removeItem(scheduleManifestKey(caseId)); } catch { /* storage may be unavailable */ }
+}
+
 
 /**
  * Store every registered document that has bytes and is not yet stored. Every outcome is reported per document;
@@ -32,17 +39,25 @@ const isSession = (caseId: string) => caseId.startsWith('session-');
  */
 async function storeAllDocuments(caseId: string, reg: DocumentRegistry): Promise<StoreOutcome[]> {
   const out: StoreOutcome[] = [];
+  const localSchedules: ServerDoc[] = [];
+  const localDrawings: NonNullable<ChangeHandoff['documents']> = [];
+  clearTemporaryPreviewManifest(caseId);
   for (const d of reg.list()) {
     if (d.storagePath && (d.state === 'stored' || d.state === 'parsed')) { out.push({ id: d.id, path: d.path, stored: true, error: '' }); continue; }
     const bytes = reg.bytesOf(d.id);
     if (!bytes) { out.push({ id: d.id, path: d.path, stored: false, error: 'The file contents are not in this browser. Reconnect the file.' }); continue; }
     // Always mirror locally so a reload in this browser restores contents even if the server is unreachable.
-    void cachePut(cacheKey(d.sha256), bytes);
     if (isSession(caseId)) {
+      if (d.role === 'drawings') {
+        if (await cachePut(cacheKey(d.sha256), bytes)) localDrawings.push({id:d.id, name:d.path, sha256:d.sha256, version:d.version, role:d.role});
+      } else if (d.role === 'schedule') {
+        if (await cachePut(cacheKey(d.sha256), bytes)) localSchedules.push({id:d.id, path:d.path, name:d.name, role:d.role, sha256:d.sha256, size:d.size, version:d.version, subrole:d.subrole, stored:false, state:'uploaded', stateDetail:'Temporary browser preview only', uploadedAt:d.uploadedAt});
+      } else { void cachePut(cacheKey(d.sha256), bytes); }
       reg.setState(d.id, 'uploaded', 'Temporary case: held in this browser only, not stored on a server.');
       out.push({ id: d.id, path: d.path, stored: false, error: 'This is a temporary case, so the file was not stored on a server.' });
       continue;
     }
+    void cachePut(cacheKey(d.sha256), bytes);
     try {
       const q = new URLSearchParams({ docId: d.id, path: d.path, name: d.name, role: d.role, sha256: d.sha256, version: String(d.version), subrole: d.subrole ?? '', manual: d.roleManual ? '1' : '0', metadata: JSON.stringify(d.metadata ?? {}) });
       const body = new Uint8Array(bytes.byteLength);
@@ -63,6 +78,12 @@ async function storeAllDocuments(caseId: string, reg: DocumentRegistry): Promise
       out.push({ id: d.id, path: d.path, stored: false, error: msg });
     }
   }
+  if (isSession(caseId) && localDrawings.length) {
+    try { window.sessionStorage.setItem(previewManifestKey(caseId), JSON.stringify(localDrawings)); } catch { /* preview stays unavailable */ }
+  }
+  if (isSession(caseId) && localSchedules.length) {
+    try { window.sessionStorage.setItem(scheduleManifestKey(caseId), JSON.stringify(localSchedules)); } catch { /* preview stays unavailable */ }
+  }
   return out;
 }
 
@@ -78,6 +99,22 @@ export async function loadDrawingManifest(caseId: string): Promise<ChangeHandoff
   } catch { return []; }
 }
 
+/** Only used for displaying drawings in this tab. Never authorises a cost or schedule decision. */
+export async function loadDrawingPreviewManifest(caseId: string): Promise<ChangeHandoff['documents']> {
+  if (!isSession(caseId)) return loadDrawingManifest(caseId);
+  try {
+    const manifest = JSON.parse(window.sessionStorage.getItem(previewManifestKey(caseId)) ?? '[]') as ChangeHandoff['documents'];
+    const verified: NonNullable<ChangeHandoff['documents']> = [];
+    for (const d of manifest ?? []) {
+      if (!d || d.role !== 'drawings' || !/^[a-f0-9]{64}$/.test(d.sha256)) return [];
+      const bytes = await cacheGet(cacheKey(d.sha256));
+      if (!bytes || (await sha256Hex(bytes)) !== d.sha256) return [];
+      verified.push(d);
+    }
+    return verified;
+  } catch { return []; }
+}
+
 export interface RestoreOutcome { restored: number; needReconnect: { id: string; path: string; reason: string }[]; error: string }
 
 /**
@@ -89,7 +126,12 @@ async function restoreDocuments(caseId: string, reg: DocumentRegistry): Promise<
   const needReconnect: RestoreOutcome['needReconnect'] = [];
   let restored = 0;
   let docs: ServerDoc[] = [];
-  if (!isSession(caseId)) {
+  if (isSession(caseId)) {
+    try {
+      const local = JSON.parse(window.sessionStorage.getItem(scheduleManifestKey(caseId)) ?? '[]') as ServerDoc[];
+      docs = Array.isArray(local) ? local.filter(d => d?.role === 'schedule' && !d.stored && /^[a-f0-9]{64}$/.test(d.sha256) && typeof d.name === 'string' && /\.xer$/i.test(d.name)) : [];
+    } catch { /* temporary manifest not available */ }
+  } else {
     try {
       const res = await fetch(`/api/boq-cases/${encodeURIComponent(caseId)}/documents`, { cache: 'no-store', headers: await authHeaders() });
       const data = await json<{ documents: ServerDoc[] }>(res);
@@ -166,7 +208,7 @@ export interface ServerResult { ok: boolean; error: string }
  * A failure is returned, never swallowed, so the UI can roll back instead of claiming success.
  */
 async function reclassifyOnServer(caseId: string, docId: string, role: string, subrole: string, metadata?: Record<string, string>): Promise<ServerResult> {
-  if (isSession(caseId)) return { ok: true, error: '' };
+  if (isSession(caseId)) { clearTemporaryPreviewManifest(caseId); return { ok: true, error: '' }; }
   try {
     const res = await fetch(`/api/boq-cases/${encodeURIComponent(caseId)}/documents`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', ...(await authHeaders()) }, body: JSON.stringify({ docId, role, subrole, metadata, manual: true, markStale: 'A document was reclassified.' }) });
     if (res.ok) return { ok: true, error: '' };
@@ -182,7 +224,8 @@ async function reclassifyOnServer(caseId: string, docId: string, role: string, s
  * (or was already absent). Stored originals are intentionally kept. A temporary case has nothing to unlink remotely.
  */
 async function removeOnServer(caseId: string, docIds: string[], reason: string, replacedBy?: string): Promise<ServerResult> {
-  if (isSession(caseId) || docIds.length === 0) return { ok: true, error: '' };
+  if (docIds.length === 0) return { ok: true, error: '' };
+  if (isSession(caseId)) { clearTemporaryPreviewManifest(caseId); return { ok: true, error: '' }; }
   try {
     const res = await fetch(`/api/boq-cases/${encodeURIComponent(caseId)}/documents`, { method: 'DELETE', headers: { 'Content-Type': 'application/json', ...(await authHeaders()) }, body: JSON.stringify({ docIds, reason, replacedBy }) });
     if (res.ok) return { ok: true, error: '' };

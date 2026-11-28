@@ -89,7 +89,7 @@ export default function LiveAnalysisPreview({ run, finishedLayers, onCancel, rep
       {!replayOnly ? <>
       <ol className="mt-3 grid gap-1.5 sm:grid-cols-4 lg:grid-cols-7" aria-label="Processing stages">
         {STAGES.map((s) => {
-          const st = run.stages[s.id];
+          const st = !running && run.stages[s.id] === 'active' ? 'pending' : run.stages[s.id];
           return (
             <li key={s.id} className={`flex items-center gap-1.5 rounded border px-2 py-1 text-xs ${st === 'done' ? 'border-success/40 bg-success/10 text-foreground' : st === 'active' ? 'border-accent bg-accent/10 text-foreground' : st === 'failed' ? 'border-destructive/40 bg-destructive/10 text-destructive' : 'border-border text-muted-foreground'}`}>
               {st === 'done' ? <Check size={12} aria-hidden /> : st === 'active' ? <Loader2 size={12} className="animate-spin motion-reduce:animate-none" aria-hidden /> : st === 'failed' ? <AlertTriangle size={12} aria-hidden /> : <CircleDashed size={12} aria-hidden />}

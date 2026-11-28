@@ -16,7 +16,7 @@ import { importSignatureOf, readEvidenceFile, runAgent, outcomeOf, type AgentEve
 import { EMPTY_ANSWERS, type UserAnswers } from '@/lib/boq/matchEngine';
 import type { EvidenceDoc } from '@/lib/boq/scope';
 import { handoffAsEvidence, loadHandoff, normaliseHandoff, type ChangeHandoff } from '@/lib/drawings/handoff';
-import { loadDrawingManifest, loadEvidence, saveEvidence } from '@/lib/docs/caseDocsClient';
+import { loadDrawingManifest, loadDrawingPreviewManifest, loadEvidence, saveEvidence } from '@/lib/docs/caseDocsClient';
 import { buildBoqModel, EMPTY_INCLUSION, parseInclusion, type BoqInclusionState } from '@/lib/boq/documents';
 import { overlappingItems } from '@/lib/boq/coverage';
 import { makeMatchSnapshot, MATCH_SNAPSHOT_KEY, readMatchSnapshot, type MatchSnapshot } from '@/lib/boq/matchSnapshot';
@@ -24,6 +24,7 @@ import { writeRunRecord } from '@/lib/boq/runRecord';
 import { resumableDrafts } from '@/lib/docs/scopedDraft';
 import { EMPTY_STATE, DEFAULT_SCENARIO, EMPTY_DECISIONS, describeChange, readDecisions, readResolutionState, reconcileDecisions, staleEffects, writeDecisions, writeResolutionState, type DecisionStore, type LineResolution, type ResolutionState } from '@/lib/boq/resolutions';
 import FinalPvrForm from '@/app/case-workspace/components/FinalPvrForm';
+import ScopeReadinessPanel from '@/app/case-workspace/components/ScopeReadinessPanel';
 import type { FormLine, ProgrammeWhatIf } from '@/lib/pvr/finalForm';
 import { matchesCurrentDrawings } from '@/lib/boq/drawingQuantities';
 import ActivityMappingPanel, { type ScheduleExclusion } from '@/app/case-workspace/components/ActivityMappingPanel';
@@ -32,9 +33,11 @@ import { ExcludeModal, ManualRateModal } from '@/app/case-workspace/components/L
 import { buildBoqSet } from '@/lib/boq/matchEngine';
 import { readItems, writeItems, prefillFromComponent, type AssessmentItem, type ItemDraft } from '@/lib/boq/newItem';
 import { loadCaseSchedules, type ScheduleLoadResult } from '@/lib/mapping/scheduleLoader';
+import { drawingProgrammeScope } from '@/lib/mapping/drawingProgrammeScope';
+import type { ProgrammeScopeLine } from '@/lib/assessment/programmeScope';
 import RealProgrammePanel, { referenceOnlyProgramme } from '@/app/case-workspace/components/RealProgrammePanel';
 import { buildSharedLines, buildSharedLinesDetailed } from '@/lib/mapping/sharedLines';
-import type { MappingChoices } from '@/lib/mapping/realActivityMapping';
+import { cannotAssignProgrammeWork, type MappingChoices } from '@/lib/mapping/realActivityMapping';
 import ValuationPanel from '@/app/case-workspace/components/ValuationPanel';
 import { DeferModal } from '@/app/case-workspace/components/LineResolutionControls';
 import { EMPTY_VALUATION, loadValuation, markValuationStale, saveValuation, type ValuationState } from '@/lib/boq/valuationClient';
@@ -172,7 +175,9 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
         const current = await loadDrawingManifest(caseId);
         if (cancelled) return;
         if (snapshot) setSavedMatches({ caseId, snapshot, drawingsCurrent: matchesCurrentDrawings(snapshot.drawings, current), persisted: ev.persisted });
-        if (h?.drawingReplay && matchesCurrentDrawings(h.documents, current)) setVerifiedReplay({caseId, handoff:h});
+        const drawable = caseId.startsWith('session-') && h?.drawingReplay ? await loadDrawingPreviewManifest(caseId) : current;
+        if (cancelled) return;
+        if (h?.drawingReplay && matchesCurrentDrawings(h.documents, drawable)) setVerifiedReplay({caseId, handoff:h});
       }
       const original = ev.evidence?.narrative ?? h?.originalNarrative ?? '';
       if (original.trim()) setNarrative((cur) => (cur.trim() ? cur : original));
@@ -337,9 +342,45 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
   const inputSchedules = useMemo(() => schedLoad?.schedules.filter(s => !referenceOnlyProgramme(s)) ?? [], [schedLoad]);
   const referenceSchedules = useMemo(() => schedLoad?.schedules.filter(referenceOnlyProgramme) ?? [], [schedLoad]);
   const activeSchedule = inputSchedules[schedIdx] ?? null;
-  const confirmedProgrammeTasks = useMemo(() => mappingProgrammeHash === activeSchedule?.sha256
-    ? sharedLines.filter(l => l.work.executes && !schedExcl[l.lineId] && !mapChoices[l.lineId]?.state).flatMap(l => mapChoices[l.lineId]?.activityTaskIds ?? []) : [],
-    [mappingProgrammeHash,activeSchedule,sharedLines,schedExcl,mapChoices]);
+  const drawingsAreCurrent = useCallback(async () => !!handoff && matchesCurrentDrawings(handoff.documents, await loadDrawingManifest(caseId)), [caseId,handoff]);
+  const drawingScope = useMemo(() => drawingProgrammeScope(handoff,loaded?.case?.currency??'AED'),[handoff,loaded?.case?.currency]);
+  // Drawings keep the same scheduling identity when a BOQ match is subsequently confirmed.
+  const drawingLineId=new Map(drawingScope.lines.map(l=>[l.componentId,l.lineId]));
+  const costLineId=new Map<string,string>();
+  const programmeLines = agentRun
+    ? [...sharedLines.map(l=>{
+       const id=l.origin==='new_item'?l.lineId:drawingLineId.get(l.componentId)??l.lineId;
+       costLineId.set(id,l.lineId);
+       return id===l.lineId?l:{...l,lineId:id,work:{...l.work,lineId:id}};
+      }),...drawingScope.lines.filter(line=>line.componentId.startsWith('pending-drawing:')&&
+       !sharedLines.some(l=>l.name===line.name&&l.work.executes&&!l.work.quantity))]
+    : drawingScope.lines;
+  const programmeChoice=(id:string)=>mapChoices[id]??mapChoices[costLineId.get(id)??id];
+  const programmeExclusion=(id:string)=>schedExcl[id]??schedExcl[costLineId.get(id)??id];
+  const programmeScope = useMemo<ProgrammeScopeLine[]>(() => {
+    const eligible=new Map(activeSchedule?.model.activities.filter(a=>a.kind==='task' && !a.actualFinish).map(a=>[a.taskId??a.id,a]));
+    const source=new Map([...drawingScope.components,...(agentRun?.scope.components??[])].map(c=>[c.id,c]));
+    const used=new Set(activeSchedule?.model.activities.map(a=>a.id));let newIndex=0;
+    return programmeLines.filter(l=>l.work.executes).map(l=>{
+      const component=source.get(l.componentId);
+      const q=l.origin!=='new_item'&&component?.quantity?.origin==='measured_from_geometry'?component.quantity:null;
+      const choice=programmeChoice(l.lineId);
+      const ids=choice?.activityTaskIds??[];
+      const activityCodes=mappingProgrammeHash===activeSchedule?.sha256&&!choice?.state&&ids.every(id=>{const a=eligible.get(id);return !!a&&!cannotAssignProgrammeWork(l.work,a);})
+        ? ids.map(id=>eligible.get(id)!.id) : [];
+      let newCode:string|undefined;
+      if(mappingProgrammeHash===activeSchedule?.sha256&&choice?.wantsNewActivity&&!ids.length&&!choice.state) {
+        do {newCode='PVR-NEW-'+(++newIndex);} while(used.has(newCode));
+      }
+      return {id:l.lineId,name:l.name,quantity:q?.value??null,unit:q?.unit??l.work.unit,
+        drawingSource:q?[q.source,q.quote].filter(Boolean).join(' · '):'',
+        boqSource:l.origin==='boq'&&!l.source.startsWith('Processed PVR')?l.source:'',
+        activityCodes,newCode,split:Object.fromEntries(ids.flatMap(id=>{const a=eligible.get(id),s=choice?.shares?.[id];return a&&s?[[a.id,s]]:[];})),blocker:agentStale||agentRunning?'Verify the current source and rerun the drawing assessment.'
+          : l.heldForOverlap?'Resolve overlapping scope before assigning a duration.'
+          : programmeExclusion(l.lineId)||choice?.state?'This line is held or excluded in activity mapping.'
+          : component?.action!=='add'?'Omission, replacement and rework need a separate reviewed time basis; added hours cannot be assumed.':undefined};
+    });
+  },[activeSchedule,agentRun,agentStale,agentRunning,drawingScope,programmeLines,mapChoices,mappingProgrammeHash,schedExcl]);
 
   // A changed programme invalidates choices that pointed at its activities.
   useEffect(() => {
@@ -440,7 +481,6 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
     }
   };
 
-  const drawingsAreCurrent = async () => !!handoff && matchesCurrentDrawings(handoff.documents, await loadDrawingManifest(caseId));
   const confirmAssessment = async () => {
     if (!agentRun || !selectedImport || !loaded?.case) return;
     if (agentStale || !(await drawingsAreCurrent())) {
@@ -618,18 +658,19 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
     const fallback=!!manual?.processedPvr;
     const sources=calc?.sources.map(s=>[s.file,[s.sheet,s.rateCell].filter(Boolean).join('!')].filter(Boolean).join(' · ')).join('; ');
     const trusted=!!q && !!(calc||fallback);
+    const mapping=programmeChoice(l.origin==='new_item'?l.lineId:drawingLineId.get(l.componentId)??l.lineId);
     return [{
       ...t, disposition:t.disposition==='priced'&&!trusted?'unpriced':t.disposition,
-      signedAmount:trusted?t.signedAmount:null, description:l.name, quantity:q?.value??null, quantityUnit:q?.unit??l.work.unit,
+      signedAmount:trusted?t.signedAmount:null, description:l.name, quantity:q?.value??null, quantityUnit:q?.unit??l.work.unit, quantityAction:component?.action,
       drawingSource:q ? [q.source,q.quote].filter(Boolean).join(' · ') : '',
       rate:fallback ? manual!.value : calc?.rate??null, rateUnit:fallback ? manual!.unit : calc?.boqUnit??'',
       rateSource:fallback ? 'Processed PVR rate (BOQ unavailable): '+l.source : sources ? 'Contract BOQ: '+sources : 'No verified BOQ or cited fallback rate',
       rateFallback:fallback,
-      mappedActivity:mappingProgrammeHash === activeSchedule?.sha256 && !mapChoices[l.lineId]?.state
-        ? (mapChoices[l.lineId]?.activityTaskIds??[]).map(id=>activeSchedule?.model.activities.find(a=>(a.taskId??a.id)===id)?.id).filter(Boolean).join(', ') : undefined,
+      mappedActivity:mappingProgrammeHash === activeSchedule?.sha256 && !mapping?.state
+        ? (mapping?.activityTaskIds??[]).map(id=>activeSchedule?.model.activities.find(a=>(a.taskId??a.id)===id)?.id).filter(Boolean).join(', ') : undefined,
     } satisfies FormLine];
   });
-  const whatIf=programmeWhatIf && activeSchedule?.fileName===programmeWhatIf.input ? programmeWhatIf : null;
+  const whatIf=programmeWhatIf && activeSchedule?.sha256===programmeWhatIf.sourceSha256 ? programmeWhatIf : null;
   const formReady=!!agentRun && assessmentConfirmed && !agentStale && !staleNow.length && !resState.costStale && !agentRunning;
   const formBlockers=[
     ...(!agentRun?['Run the drawing-based analysis.']:!formReady?['Review and confirm the current valuation before treating this as a final PVR.']:[]),
@@ -638,6 +679,38 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
   ];
 
   const confirmed = imports.filter((i) => i.confirmedAt);
+
+  const programmePanel = activeSchedule ? <RealProgrammePanel caseId={caseId} key={caseId+':'+activeSchedule.docId+':'+activeSchedule.sha256} source={activeSchedule} references={referenceSchedules}
+            scope={programmeScope} onScenario={setProgrammeWhatIf} verifyDrawings={drawingsAreCurrent} />
+            : referenceSchedules.length > 0 ? <p role="status">A processed programme is available. Upload the pre-impact XER separately to compare the two.</p> : null;
+
+  const programmeMapping = programmeLines.length ? (
+            <>
+              {schedLoading ? <div className="skeleton h-24 rounded-lg" role="status" aria-label="Reading programme" /> : (
+                <ActivityMappingPanel
+                  model={activeSchedule?.model ?? null}
+                  scheduleFileName={activeSchedule?.fileName ?? ''}
+                  lines={programmeLines}
+                  choices={mappingProgrammeHash === activeSchedule?.sha256 ? Object.fromEntries(programmeLines.flatMap(l=>{const c=programmeChoice(l.lineId);return c?[[l.lineId,c]]:[];})) : {}}
+                  onChoices={(c) => { setMappingProgrammeHash(activeSchedule?.sha256 ?? ''); setMapChoices(c); setAssessmentConfirmed(false); }}
+                  scheduleExclusions={Object.fromEntries(programmeLines.flatMap(l=>{const e=programmeExclusion(l.lineId);return e?[[l.lineId,e]]:[];}))}
+                  onScheduleExclusion={(id, ex) => {
+                    setSchedExcl((cur) => { const n = { ...cur }; const alias=costLineId.get(id);if(alias&&alias!==id)delete n[alias]; if (ex) n[id] = ex; else delete n[id]; return n; });
+                    if (ex?.kind === 'scenario' || (!ex && programmeExclusion(id)?.kind === 'scenario')) setResState((cur) => { const s = { ...cur, scheduleStale: true, costStale: true, updatedAt: new Date().toISOString() }; writeResolutionState(caseId, s); return s; });
+                  }}
+                  onManualRate={selectedImport&&agentRun?(id) => setPanelManual(costLineId.get(id)??id):undefined}
+                  onCreateItem={selectedImport&&agentRun?(id)=>openCreateItem(costLineId.get(id)??id):undefined}
+                  onExcludeCost={selectedImport&&agentRun?(id) => setPanelExclude(costLineId.get(id)??id):undefined}
+                  onDeferCost={selectedImport&&agentRun?(id) => setPanelDefer(costLineId.get(id)??id):undefined}
+                  partialAccepted={partialAccepted}
+                  onContinuePartial={() => setPartialAccepted(true)}
+                  running={schedLoading}
+                  onRetry={() => setMapRetry((n) => n + 1)}
+                  scheduleStale={resState.scheduleStale}
+                />
+              )}
+            </>
+          ) : null;
 
   return (
     <div className="space-y-5">
@@ -655,10 +728,29 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
         {loaded.persistence.mode === 'session_only' ? <p className="mt-2 text-sm text-foreground">{SESSION_LOSS_WARNING}</p> : null}
       </header>
 
+      {verifiedReplay?.caseId === caseId && handoff === verifiedReplay.handoff && handoff.drawingReplay ? (
+        <SavedDrawingReplay key={caseId} replay={handoff.drawingReplay} changes={handoff.changes} showSheets />
+      ) : handoff?.documents.some((d) => d.role === 'drawings') ? (
+        <section aria-label="Drawing processing preview" className="rounded-lg border border-border bg-card p-4">
+          <h3 className="font-semibold">Drawing processing preview</h3>
+          <p className="text-sm text-muted-foreground">{handoff.drawingReplay
+            ? 'Saved geometry cannot be shown because the active drawing revisions could not be verified. Repeat the drawing analysis to refresh the preview.'
+            : 'No verified drawing pair was saved for replay. In the drawing analysis, check the revision pairing, file support, drawing size and sign-in status.'}</p>
+        </section>
+      ) : null}
+
+          {inputSchedules.length > 1 ? (
+                <div className="flex items-center gap-2 text-sm"><label htmlFor="sched-pick" className="text-muted-foreground">Programme in use</label>
+                  <select id="sched-pick" value={schedIdx} onChange={(e) => setSchedIdx(Number(e.target.value))} className="rounded-md border border-input bg-card px-2 py-1 text-foreground">{inputSchedules.map((s, i) => <option key={s.docId} value={i}>{s.fileName}{s.subrole ? ` (${s.subrole})` : ''}</option>)}</select></div>
+              ) : null}
+          {schedLoad && schedLoad.problems.length > 0 ? <ul role="status" className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-foreground">{schedLoad.problems.map((pr) => <li key={pr.fileName}><span className="font-medium">{pr.fileName}</span>: {pr.reason}</li>)}</ul> : null}
+          {programmeMapping}
+          {programmePanel}
+
       {!selectedImport ? (
         <div className="rounded-lg border border-warning/40 bg-warning/10 p-5">
           <p className="font-semibold text-foreground">No confirmed BOQ for this case.</p>
-          <p className="mt-1 text-muted-foreground">Import and confirm a BOQ on the Documents screen first. Rates are never taken from anywhere else.</p>
+          <p className="mt-1 text-muted-foreground">A confirmed BOQ is needed for cost only. You can review and simulate the programme above without one.</p>
           <Link href="/new-pvr" className="mt-3 inline-block rounded-md bg-primary px-4 py-2 font-semibold text-primary-foreground hover:opacity-90">Go to Documents</Link>
         </div>
       ) : (
@@ -736,11 +828,6 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
             </section>
           ) : null}
 
-          {verifiedReplay?.caseId === caseId && handoff === verifiedReplay.handoff && handoff.drawingReplay ? (
-            <SavedDrawingReplay replay={handoff.drawingReplay} changes={handoff.changes} />
-          ) : handoff?.drawingReplay ? (
-            <p className="text-sm text-muted-foreground">Saved drawing replay is unavailable because the active drawings could not be verified.</p>
-          ) : null}
           {savedMatches?.caseId === caseId && !agentRun ? (
             <section aria-label="Saved BOQ match preview" className="rounded-lg border border-border bg-card p-4">
               <h3 className="font-semibold">Saved BOQ match preview</h3>
@@ -833,43 +920,8 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
             </section>
           ) : null}
 
-          {inputSchedules.length > 1 ? (
-                <div className="flex items-center gap-2 text-sm"><label htmlFor="sched-pick" className="text-muted-foreground">Programme in use</label>
-                  <select id="sched-pick" value={schedIdx} onChange={(e) => setSchedIdx(Number(e.target.value))} className="rounded-md border border-input bg-card px-2 py-1 text-foreground">{inputSchedules.map((s, i) => <option key={s.docId} value={i}>{s.fileName}{s.subrole ? ` (${s.subrole})` : ''}</option>)}</select></div>
-              ) : null}
-          {schedLoad && schedLoad.problems.length > 0 ? <ul role="status" className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-foreground">{schedLoad.problems.map((pr) => <li key={pr.fileName}><span className="font-medium">{pr.fileName}</span>: {pr.reason}</li>)}</ul> : null}
-          {agentRun ? (
-            <>
-              {schedLoading ? <div className="skeleton h-24 rounded-lg" role="status" aria-label="Reading programme" /> : (
-                <ActivityMappingPanel
-                  model={activeSchedule?.model ?? null}
-                  scheduleFileName={activeSchedule?.fileName ?? ''}
-                  lines={sharedLines}
-                  choices={mappingProgrammeHash === activeSchedule?.sha256 ? mapChoices : {}}
-                  onChoices={(c) => { setMappingProgrammeHash(activeSchedule?.sha256 ?? ''); setMapChoices(c); setAssessmentConfirmed(false); }}
-                  scheduleExclusions={schedExcl}
-                  onScheduleExclusion={(id, ex) => {
-                    setSchedExcl((cur) => { const n = { ...cur }; if (ex) n[id] = ex; else delete n[id]; return n; });
-                    if (ex?.kind === 'scenario' || (!ex && schedExcl[id]?.kind === 'scenario')) setResState((cur) => { const s = { ...cur, scheduleStale: true, costStale: true, updatedAt: new Date().toISOString() }; writeResolutionState(caseId, s); return s; });
-                  }}
-                  onManualRate={(id) => setPanelManual(id)}
-                  onCreateItem={openCreateItem}
-                  onExcludeCost={(id) => setPanelExclude(id)}
-                  onDeferCost={(id) => setPanelDefer(id)}
-                  partialAccepted={partialAccepted}
-                  onContinuePartial={() => setPartialAccepted(true)}
-                  running={schedLoading}
-                  onRetry={() => setMapRetry((n) => n + 1)}
-                  scheduleStale={resState.scheduleStale}
-                />
-              )}
-            </>
-          ) : null}
-
-          {activeSchedule ? <RealProgrammePanel key={activeSchedule.sha256} source={activeSchedule} references={referenceSchedules}
-            confirmedTaskIds={confirmedProgrammeTasks} onScenario={setProgrammeWhatIf} />
-            : referenceSchedules.length > 0 ? <p role="status">A processed programme is available. Upload the pre-impact XER separately to compare the two.</p> : null}
-          <FinalPvrForm key={caseId} caseId={caseId} title={c.title} lines={formLines} reportReady={formReady} whatIf={whatIf} blockers={formBlockers} verifyDrawingRevisions={drawingsAreCurrent} />
+          {activeSchedule && formReady && <ScopeReadinessPanel key={activeSchedule.sha256} lines={formLines} model={activeSchedule.model} />}
+          <FinalPvrForm key={caseId} caseId={caseId} title={c.title} lines={formLines} reportReady={formReady} whatIf={whatIf} blockers={formBlockers} drawingNotes={handoff?.openQuestions.filter(q=>q.id.startsWith('referenced-drawing-')).map(q=>q.issue)} verifyDrawingRevisions={drawingsAreCurrent} />
           {itemModal ? (
             <NewItemEntry key={itemModal.existing?.id ?? 'new'} open caseId={caseId} currency={loaded.case.currency || 'AED'} initial={itemModal.draft} existing={itemModal.existing} set={boqSet}
               scopeOptions={(agentRun?.scope.components ?? []).map((c) => ({ id: c.id, label: c.name }))} onClose={() => setItemModal(null)} onSaveItem={saveItem} onAddBoqItem={addBoqItemToScope} newId={() => newId('item')} />

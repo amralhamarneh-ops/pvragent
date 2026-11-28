@@ -18,9 +18,9 @@ interface Props {
   scheduleExclusions: Record<string, ScheduleExclusion>;
   onScheduleExclusion: (lineId: string, next: ScheduleExclusion | undefined) => void;
   /** Cost-side controls, reused from the cost review so one resolution model serves both screens. */
-  onManualRate: (lineId: string) => void;
-  onCreateItem: (lineId: string) => void;
-  onExcludeCost: (lineId: string) => void;
+  onManualRate?: (lineId: string) => void;
+  onCreateItem?: (lineId: string) => void;
+  onExcludeCost?: (lineId: string) => void;
   /** Postpone cost valuation only. Schedule scope is retained. */
   onDeferCost?: (lineId: string) => void;
   partialAccepted: boolean;
@@ -74,7 +74,7 @@ export default function ActivityMappingPanel(p: Props) {
         <h2 id="am-title" className="text-lg font-semibold text-foreground">D. Activity mapping</h2>
         <p className="text-sm text-muted-foreground">{p.scheduleFileName} · {p.model.activityCount} activities · {p.model.relationships.filter((r) => r.resolved !== false).length} relationships{p.model.dataDate ? ` · data date ${p.model.dataDate}` : ''}</p>
       </div>
-      <p className="mt-1 text-sm text-muted-foreground">The agent reads each costed line as a work operation, searches the whole programme (names, WBS, codes, location, progress), checks construction sequence and activity type, then proposes. It asks only where evidence is missing.</p>
+      <p className="mt-1 text-sm text-muted-foreground">The agent reads each scope line as a work operation, searches the whole programme (names, WBS, codes, location, progress), checks construction sequence and activity type, then proposes. It asks only where evidence is missing.</p>
 
       {p.scheduleStale ? <p role="alert" className="mt-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-foreground">A scenario-wide scope change invalidated earlier schedule results. Mappings below are recomputed; recalculate the programme impact.</p> : null}
       {modelWarnings.length > 0 ? <ul className="mt-2 list-disc pl-5 text-xs text-muted-foreground">{modelWarnings.map((w) => <li key={w}>{w}</li>)}</ul> : null}
@@ -95,7 +95,7 @@ export default function ActivityMappingPanel(p: Props) {
       {m.duplicateGuard.length > 0 ? <p className="mt-2 text-xs text-muted-foreground">Duplicate guard: {m.duplicateGuard.join('; ')}.</p> : null}
       {m.sharedActivities.length > 0 ? <p className="mt-2 text-xs text-muted-foreground">Shared activities (quantity is allocated, never repeated): {m.sharedActivities.map((s) => `${s.code} ← ${s.lines.length} lines`).join('; ')}.</p> : null}
 
-      {p.lines.length === 0 ? <p className="mt-3 text-muted-foreground">No costed scope yet. Run the analysis above first.</p> : (
+      {p.lines.length === 0 ? <p className="mt-3 text-muted-foreground">No drawing scope yet. Run the drawing analysis first.</p> : (
         <ul className="mt-3 space-y-3">
           {m.mappings.map((x) => {
             const line = p.lines.find((l) => l.lineId === x.lineId) as SharedLine;
@@ -182,11 +182,11 @@ export default function ActivityMappingPanel(p: Props) {
                 <div className="mt-2 flex flex-wrap gap-2 text-xs" role="group" aria-label={`Resolve ${x.name}`}>
                   <button type="button" onClick={() => setChoice(x.lineId, undefined)} className="rounded-md border border-input bg-card px-2 py-1 font-medium hover:bg-muted">Retry automatic mapping</button>
                   <button type="button" onClick={() => setChoice(x.lineId, { wantsNewActivity: true })} className="rounded-md border border-input bg-card px-2 py-1 font-medium hover:bg-muted">Propose a new activity</button>
-                  <button type="button" onClick={() => p.onManualRate(x.lineId)} className="rounded-md border border-input bg-card px-2 py-1 font-medium hover:bg-muted">Add / edit manual rate</button>
-                  <button type="button" onClick={() => p.onCreateItem(x.lineId)} className="rounded-md border border-input bg-card px-2 py-1 font-medium hover:bg-muted">Create new assessment item</button>
+                  {p.onManualRate && <button type="button" onClick={() => p.onManualRate!(x.lineId)} className="rounded-md border border-input bg-card px-2 py-1 font-medium hover:bg-muted">Add / edit manual rate</button>}
+                  {p.onCreateItem && <button type="button" onClick={() => p.onCreateItem!(x.lineId)} className="rounded-md border border-input bg-card px-2 py-1 font-medium hover:bg-muted">Create new assessment item</button>}
                   <button type="button" onClick={() => setChoice(x.lineId, { state: 'deferred', reason: 'Deferred by you; assessment continues.' })} className="rounded-md border border-input bg-card px-2 py-1 font-medium hover:bg-muted">Defer and continue</button>
                   <button type="button" onClick={() => setChoice(x.lineId, { state: 'not_applicable', reason: 'Marked not applicable to the programme.' })} className="rounded-md border border-input bg-card px-2 py-1 font-medium hover:bg-muted">Not applicable</button>
-                  <button type="button" onClick={() => p.onExcludeCost(x.lineId)} className="rounded-md border border-input bg-card px-2 py-1 font-medium hover:bg-muted">Exclude from cost only</button>
+                  {p.onExcludeCost && <button type="button" onClick={() => p.onExcludeCost!(x.lineId)} className="rounded-md border border-input bg-card px-2 py-1 font-medium hover:bg-muted">Exclude from cost only</button>}
                   {p.onDeferCost ? <button type="button" onClick={() => p.onDeferCost!(x.lineId)} className="rounded-md border border-input bg-card px-2 py-1 font-medium hover:bg-muted">Defer cost valuation</button> : null}
                   <button type="button" onClick={() => p.onScheduleExclusion(x.lineId, { kind: 'schedule_only', reason: 'Excluded from schedule assessment by you.', at: new Date().toISOString() })} className="rounded-md border border-input bg-card px-2 py-1 font-medium hover:bg-muted">Exclude from schedule only</button>
                   <button type="button" onClick={() => p.onScheduleExclusion(x.lineId, { kind: 'scenario', reason: 'Excluded from this scenario by you.', at: new Date().toISOString() })} className="rounded-md border border-input bg-card px-2 py-1 font-medium hover:bg-muted">Exclude from scenario</button>
