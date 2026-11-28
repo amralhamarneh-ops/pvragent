@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useState, useRef, useReducer } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { ArrowRight, Save } from 'lucide-react';
@@ -15,7 +15,8 @@ import DrawingAnalysisPanel, { type PanelDoc } from '@/app/case-workspace/compon
 import BackgroundJobPanel from '@/app/case-workspace/components/BackgroundJobPanel';
 import { serverExtractor } from '@/lib/drawings/extractClient';
 import { buildHandoff, saveHandoff } from '@/lib/drawings/handoff';
-import { nextVersion } from '@/lib/drawings/snapshot';
+import { buildSnapshot, nextVersion, saveSnapshot } from '@/lib/drawings/snapshot';
+import { initialRun, runReducer } from '@/lib/drawings/runState';
 import EvidenceDrawer from '@/components/EvidenceDrawer';
 import Modal from '@/components/ui/Modal';
 import JourneyStepper from '@/components/JourneyStepper';
@@ -101,6 +102,18 @@ export default function NewPvrFlow() {
   const [analysis, setAnalysis] = useState<AnalysisOutput | null>(null);
   const [analysing, setAnalysing] = useState(false);
   const [analysisError, setAnalysisError] = useState('');
+  const [previewRun, dispatchPreview] = useReducer(runReducer, undefined, initialRun);
+  const [streamGeometry, setStreamGeometry] = useState(true);
+  const activeAnalysis = useRef<{ id: string; scope: string; controller: AbortController } | null>(null);
+  const cancelAnalysis = useCallback(() => {
+    const active = activeAnalysis.current;
+    if (!active) return;
+    activeAnalysis.current = null;
+    active.controller.abort();
+    dispatchPreview({ type: 'cancel', runId: active.id, caseId: active.scope });
+    setAnalysing(false);
+  }, []);
+  useEffect(() => () => activeAnalysis.current?.controller.abort(), []);
   const [qAnswers, setQAnswers] = useState<Record<string, string>>({});
   const [manualOpen, setManualOpen] = useState(false);
   const [manualQty, setManualQty] = useState('');
@@ -147,6 +160,7 @@ export default function NewPvrFlow() {
 
   /** Open a draft scope: restore only that scope's state. Nothing else is read from browser storage. */
   const openScope = useCallback((id: string, draft: ScopedDraft | null) => {
+    cancelAnalysis(); dispatchPreview({ type: 'reset' });
     epochRef.current += 1;
     scopeRef.current = id;
     setScopeId(id);
@@ -171,7 +185,7 @@ export default function NewPvrFlow() {
     setRealCase(null); setBoqImports([]); setPersistence(null); setSaveError(''); setStartNotes([]); setInclusion(EMPTY_INCLUSION);
     setSub('pack');
     bump();
-  }, [bump]);
+  }, [cancelAnalysis, bump]);
 
   // Mount: open THIS tab's active draft if there is one, otherwise a fresh empty PVR. Older drafts are only offered, never opened.
   useEffect(() => {
@@ -287,6 +301,7 @@ export default function NewPvrFlow() {
    * Historical assessment versions are not touched; the current results are only marked stale.
    */
   const invalidateDerived = useCallback((reason: string) => {
+    cancelAnalysis(); dispatchPreview({ type: 'reset' });
     epochRef.current += 1;
     setAnalysis(null); analysisRef.current = null;
     setLastExtracted([]); lastExtractedRef.current = [];
@@ -298,7 +313,7 @@ export default function NewPvrFlow() {
     setProcessedBoqKeys(new Set());
     setStaleReason(reason);
     setSub((s) => (s === 'pack' ? s : 'pack'));
-  }, []);
+  }, [cancelAnalysis]);
 
   /** Pull the registry-derived lists back into React state after a mutation so both lists and readiness agree. */
   const syncFromRegistry = useCallback((removedPaths: string[]) => {
@@ -565,29 +580,54 @@ export default function NewPvrFlow() {
 
   /** Documents handed to the drawing analysis panel: the same registry rows, with their real bytes. */
     const panelDocs: PanelDoc[] = useMemo(() => managedDocs.filter((d) => d.role !== 'reference' && !isProcessedPvrFile(d.path)).map((d) => ({ id: d.id, name: d.path, sha256: d.sha256, role: d.role, bytes: registry.current.bytesOf(d.id) })), [managedDocs]); // eslint-disable-line react-hooks/exhaustive-deps
+  const analysisKey = panelDocs.map((d) => `${d.id}:${d.sha256}:${d.role}`).join('|') + JSON.stringify([narrative, manualQty, manualUnit, manualComponent]);
+  useEffect(() => {
+    cancelAnalysis(); dispatchPreview({ type: 'reset' });
+    if (analysisRef.current) {
+      analysisRef.current = null; setAnalysis(null);
+      lastExtractedRef.current = []; setLastExtracted([]);
+    }
+  }, [scopeId, analysisKey, cancelAnalysis]);
   const docByPath = useMemo(() => new Map(managedDocs.map((d) => [d.path, d])), [managedDocs]);
 
   /** Read the actual uploaded files and analyse them. Nothing typed is required. */
   const runAnalysis = useCallback(async (answers: Record<string, string> = qAnswers): Promise<AnalysisOutput | null> => {
+    cancelAnalysis();
     const myEpoch = epochRef.current;
-    let current = () => epochRef.current === myEpoch;
+    const scope = scopeRef.current;
+    const id = `run-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`;
+    const controller = new AbortController();
+    const signal = controller.signal;
+    activeAnalysis.current = { id, scope, controller };
+    const current = () => epochRef.current === myEpoch && activeAnalysis.current?.id === id && !signal.aborted;
     setAnalysing(true);
     setAnalysisError('');
+    setAnalysis(null); analysisRef.current = null; lastExtractedRef.current = []; setLastExtracted([]);
+    dispatchPreview({ type: 'start', runId: id, caseId: scope, at: Date.now() });
     try {
-      const inputs: InputFile[] = [];
+      const inputs: InputFile[] = panelDocs.map((d) => ({ name: d.name, bytes: d.bytes, role: d.role as InputFile['role'], docId: d.id }));
+      // The sample workflow can intentionally have unregistered file metadata; do not manufacture preview bytes.
       for (const f of files) {
-        if (f.role === 'reference' || isProcessedPvrFile(f.path)) continue;
-        inputs.push({ name: f.name, bytes: registry.current.bytesByPath(f.path), role: f.role });
+        if (!inputs.some((d) => d.name === f.path) && f.role !== 'reference' && !isProcessedPvrFile(f.path))
+          inputs.push({ name: f.path, bytes: registry.current.bytesByPath(f.path), role: f.role });
       }
       const manual = manualQty.trim() && manualComponent.trim() ? { quantity: [{ componentId: manualComponent.trim(), value: manualQty.trim(), unit: manualUnit }] } : undefined;
-      // Answers are applied as typed resolutions to the inputs, then the whole comparison is re-run.
-      const readCache = reads.current;
-      const first = await analyseDocuments({ files: inputs, narrative, manual, extractor: serverExtractor, readCache });
-      if (!current()) return null; // the document set changed while this ran: its output is obsolete
+      const shared = { files: inputs, narrative, manual, extractor: serverExtractor, readCache: reads.current, runId: id, caseId: scope, signal };
+      let lastSeq = 0;
+      const first = await analyseDocuments({ ...shared, streamGeometry, onEvent: (event) => {
+        lastSeq = event.seq;
+        if (current()) dispatchPreview({ type: 'event', event });
+      } });
+      if (!current() || first.cancelled) return null;
       const resolutions = resolutionsFrom(first.questions, answers);
       const hasResolutions = Object.keys(resolutions.pairOverride).length + Object.keys(resolutions.unitOverride).length + Object.keys(resolutions.quantitySource).length > 0 || !!resolutions.eventDate;
-      const res = hasResolutions ? await analyseDocuments({ files: inputs, narrative, manual, resolutions, extractor: serverExtractor, readCache }) : first;
-      if (!current()) return null;
+      const res = hasResolutions ? await analyseDocuments({ ...shared, resolutions, streamGeometry: false, onEvent: (event) => {
+        if (current()) dispatchPreview({ type: 'event', event: { ...event, seq: lastSeq + event.seq } });
+      } }) : first;
+      if (!current() || res.cancelled) return null;
+      const snapshot = buildSnapshot(scope, id, res, panelDocs, narrative, nextVersion(scope));
+      saveSnapshot(snapshot);
+      dispatchPreview({ type: 'complete', runId: id, caseId: scope });
       setAnalysis(res);
       analysisRef.current = res;
       lastExtractedRef.current = res.extracted;
@@ -605,12 +645,16 @@ export default function NewPvrFlow() {
       bump();
       return res;
     } catch (e) {
-      if (current()) setAnalysisError(e instanceof Error ? `The analysis failed: ${e.message}` : 'The analysis failed.');
+      if (current()) {
+        const message = e instanceof Error ? e.message : 'Unknown error.';
+        dispatchPreview({ type: 'fail', runId: id, caseId: scope, message });
+        setAnalysisError(`The analysis failed: ${message}`);
+      }
       return null;
     } finally {
-      if (current()) setAnalysing(false);
+      if (activeAnalysis.current?.id === id) { activeAnalysis.current = null; setAnalysing(false); }
     }
-  }, [files, narrative, manualQty, manualComponent, manualUnit, qAnswers, bump]);
+  }, [panelDocs, files, narrative, manualQty, manualComponent, manualUnit, qAnswers, bump, cancelAnalysis, streamGeometry]);
 
   /** An answer changes the interpretation: record it, persist it, and re-run the comparison with it applied. */
   const answerQuestion = useCallback((id: string, opt: string) => {
@@ -919,7 +963,8 @@ export default function NewPvrFlow() {
       Array.from(registry.current.list()).forEach((d) => { if (d.role !== 'unused' && !d.roleManual) void setDocRole(caseId, d.id, d.role); });
       // 2. Analyse the available evidence (stage-specific: scope analysis needs only readable change evidence).
       let current = analysis;
-      if (!current && (files.length > 0 || narrative.trim().length > 10)) {
+      const incompletePreview = previewRun.status === 'cancelled' || previewRun.status === 'failed';
+      if (!current && !incompletePreview && (files.length > 0 || narrative.trim().length > 10)) {
         current = await runAnalysis();
       }
       // 3. Persist the ORIGINAL narrative and the structured handoff against the case, not only in this tab.
@@ -950,6 +995,8 @@ export default function NewPvrFlow() {
   };
 
   const inPack = sub === 'pack';
+  const needsDrawingPreview = !sample && !analysis && previewRun.status === 'idle' && panelDocs.some((d) => d.role === 'drawings');
+  const previewIncomplete = !analysis && ['cancelled', 'failed'].includes(previewRun.status);
   const caseTitle = narrative.trim() ? narrative.trim().split(/[.\n]/)[0].slice(0, 90) : 'New PVR';
   const caseRef = sample ? 'PVR-0418' : 'Unassigned';
   const projectName = project ? project.name : sample ? 'Fahid Island Roads Package (sample)' : 'No project linked yet';
@@ -1145,18 +1192,18 @@ export default function NewPvrFlow() {
         {sub === 'prereq' && result ? (
           <div className="mt-4">
             <h2 className="text-xl font-semibold text-foreground">Is everything in place for {result.pvrs[0]?.ref ?? 'this PVR'}?</h2>
-            <p className="mt-1 max-w-2xl text-muted-foreground">{startReady.ok ? 'Your documents are ready to analyse. Nothing needs to be typed first; continuing creates the case, stores your files and opens the assessment.' : startReady.reason}</p>
+            <p className="mt-1 max-w-2xl text-muted-foreground">{startReady.ok ? 'Your documents are ready. Process the drawings to see the preview, then continue to the assessment.' : startReady.reason}</p>
             <div className="mt-4">
               <DrawingAnalysisPanel
               scopeId={scopeId}
               documents={panelDocs}
               narrative={narrative}
-              onComplete={(out) => {
-                // The panel's run is the analysis the user watched. Adopt it so the handoff matches what was shown.
-                setAnalysis(out); analysisRef.current = out;
-                lastExtractedRef.current = out.extracted; setLastExtracted(out.extracted);
-                setStaleReason('');
-              }}
+              run={previewRun}
+              out={analysis}
+              streamGeometry={streamGeometry}
+              onStreamGeometry={setStreamGeometry}
+              onStart={() => { void runAnalysis(); }}
+              onCancel={cancelAnalysis}
             />
             </div>
             <div className="mt-4"><BackgroundJobPanel caseId={realCase?.id ?? null} /></div>
@@ -1218,7 +1265,7 @@ export default function NewPvrFlow() {
               <button type="button" disabled={!triageReady} onClick={() => setSub('prereq')} className="inline-flex items-center gap-2 rounded-md bg-primary px-5 py-2.5 font-semibold text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground">Continue to prerequisites<ArrowRight size={16} aria-hidden /></button>
             ) : null}
             {sub === 'prereq' ? (
-              <button type="button" disabled={!startReady.ok || starting || analysing} onClick={() => void startAnalysis()} className="inline-flex items-center gap-2 rounded-md bg-primary px-5 py-2.5 font-semibold text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground">{starting ? 'Opening the case…' : 'Continue to assessment'}<ArrowRight size={16} aria-hidden /></button>
+              <button type="button" disabled={!startReady.ok || starting || analysing} onClick={() => void (needsDrawingPreview ? runAnalysis() : startAnalysis())} className="inline-flex items-center gap-2 rounded-md bg-primary px-5 py-2.5 font-semibold text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground">{starting ? 'Opening the case…' : analysing ? 'Processing drawings…' : needsDrawingPreview ? 'Process drawings' : previewIncomplete ? 'Continue without drawing results' : 'Continue to assessment'}<ArrowRight size={16} aria-hidden /></button>
             ) : null}
           </div>
         </div>

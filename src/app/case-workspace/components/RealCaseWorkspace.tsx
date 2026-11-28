@@ -16,7 +16,7 @@ import { importSignatureOf, readEvidenceFile, runAgent, outcomeOf, type AgentEve
 import { EMPTY_ANSWERS, type UserAnswers } from '@/lib/boq/matchEngine';
 import type { EvidenceDoc } from '@/lib/boq/scope';
 import { handoffAsEvidence, loadHandoff, normaliseHandoff, type ChangeHandoff } from '@/lib/drawings/handoff';
-import { loadDrawingManifest, loadEvidence, saveEvidence } from '@/lib/docs/caseDocsClient';
+import { loadDrawingManifest, loadDrawingPreviewManifest, loadEvidence, saveEvidence } from '@/lib/docs/caseDocsClient';
 import { buildBoqModel, EMPTY_INCLUSION, parseInclusion, type BoqInclusionState } from '@/lib/boq/documents';
 import { overlappingItems } from '@/lib/boq/coverage';
 import { makeMatchSnapshot, MATCH_SNAPSHOT_KEY, readMatchSnapshot, type MatchSnapshot } from '@/lib/boq/matchSnapshot';
@@ -173,7 +173,9 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
         const current = await loadDrawingManifest(caseId);
         if (cancelled) return;
         if (snapshot) setSavedMatches({ caseId, snapshot, drawingsCurrent: matchesCurrentDrawings(snapshot.drawings, current), persisted: ev.persisted });
-        if (h?.drawingReplay && matchesCurrentDrawings(h.documents, current)) setVerifiedReplay({caseId, handoff:h});
+        const drawable = caseId.startsWith('session-') && h?.drawingReplay ? await loadDrawingPreviewManifest(caseId) : current;
+        if (cancelled) return;
+        if (h?.drawingReplay && matchesCurrentDrawings(h.documents, drawable)) setVerifiedReplay({caseId, handoff:h});
       }
       const original = ev.evidence?.narrative ?? h?.originalNarrative ?? '';
       if (original.trim()) setNarrative((cur) => (cur.trim() ? cur : original));
@@ -656,6 +658,26 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
         {loaded.persistence.mode === 'session_only' ? <p className="mt-2 text-sm text-foreground">{SESSION_LOSS_WARNING}</p> : null}
       </header>
 
+      {verifiedReplay?.caseId === caseId && handoff === verifiedReplay.handoff && handoff.drawingReplay ? (
+        <SavedDrawingReplay key={caseId} replay={handoff.drawingReplay} changes={handoff.changes} showSheets />
+      ) : handoff?.documents.some((d) => d.role === 'drawings') ? (
+        <section aria-label="Drawing processing preview" className="rounded-lg border border-border bg-card p-4">
+          <h3 className="font-semibold">Drawing processing preview</h3>
+          <p className="text-sm text-muted-foreground">{handoff.drawingReplay
+            ? 'Saved geometry cannot be shown because the active drawing revisions could not be verified. Repeat the drawing analysis to refresh the preview.'
+            : 'No verified drawing pair was saved for replay. In the drawing analysis, check the revision pairing, file support, drawing size and sign-in status.'}</p>
+        </section>
+      ) : null}
+
+          {inputSchedules.length > 1 ? (
+                <div className="flex items-center gap-2 text-sm"><label htmlFor="sched-pick" className="text-muted-foreground">Programme in use</label>
+                  <select id="sched-pick" value={schedIdx} onChange={(e) => setSchedIdx(Number(e.target.value))} className="rounded-md border border-input bg-card px-2 py-1 text-foreground">{inputSchedules.map((s, i) => <option key={s.docId} value={i}>{s.fileName}{s.subrole ? ` (${s.subrole})` : ''}</option>)}</select></div>
+              ) : null}
+          {schedLoad && schedLoad.problems.length > 0 ? <ul role="status" className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-foreground">{schedLoad.problems.map((pr) => <li key={pr.fileName}><span className="font-medium">{pr.fileName}</span>: {pr.reason}</li>)}</ul> : null}
+          {activeSchedule ? <RealProgrammePanel caseId={caseId} key={activeSchedule.sha256} source={activeSchedule} references={referenceSchedules}
+            confirmedTaskIds={confirmedProgrammeTasks} onScenario={setProgrammeWhatIf} />
+            : referenceSchedules.length > 0 ? <p role="status">A processed programme is available. Upload the pre-impact XER separately to compare the two.</p> : null}
+
       {!selectedImport ? (
         <div className="rounded-lg border border-warning/40 bg-warning/10 p-5">
           <p className="font-semibold text-foreground">No confirmed BOQ for this case.</p>
@@ -737,11 +759,6 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
             </section>
           ) : null}
 
-          {verifiedReplay?.caseId === caseId && handoff === verifiedReplay.handoff && handoff.drawingReplay ? (
-            <SavedDrawingReplay replay={handoff.drawingReplay} changes={handoff.changes} />
-          ) : handoff?.drawingReplay ? (
-            <p className="text-sm text-muted-foreground">Saved drawing replay is unavailable because the active drawings could not be verified.</p>
-          ) : null}
           {savedMatches?.caseId === caseId && !agentRun ? (
             <section aria-label="Saved BOQ match preview" className="rounded-lg border border-border bg-card p-4">
               <h3 className="font-semibold">Saved BOQ match preview</h3>
@@ -834,11 +851,6 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
             </section>
           ) : null}
 
-          {inputSchedules.length > 1 ? (
-                <div className="flex items-center gap-2 text-sm"><label htmlFor="sched-pick" className="text-muted-foreground">Programme in use</label>
-                  <select id="sched-pick" value={schedIdx} onChange={(e) => setSchedIdx(Number(e.target.value))} className="rounded-md border border-input bg-card px-2 py-1 text-foreground">{inputSchedules.map((s, i) => <option key={s.docId} value={i}>{s.fileName}{s.subrole ? ` (${s.subrole})` : ''}</option>)}</select></div>
-              ) : null}
-          {schedLoad && schedLoad.problems.length > 0 ? <ul role="status" className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-foreground">{schedLoad.problems.map((pr) => <li key={pr.fileName}><span className="font-medium">{pr.fileName}</span>: {pr.reason}</li>)}</ul> : null}
           {agentRun ? (
             <>
               {schedLoading ? <div className="skeleton h-24 rounded-lg" role="status" aria-label="Reading programme" /> : (
@@ -867,9 +879,6 @@ export default function RealCaseWorkspace({ caseId }: RealCaseWorkspaceProps) {
             </>
           ) : null}
 
-          {activeSchedule ? <RealProgrammePanel key={activeSchedule.sha256} source={activeSchedule} references={referenceSchedules}
-            confirmedTaskIds={confirmedProgrammeTasks} onScenario={setProgrammeWhatIf} />
-            : referenceSchedules.length > 0 ? <p role="status">A processed programme is available. Upload the pre-impact XER separately to compare the two.</p> : null}
           {activeSchedule && formReady && <ScopeReadinessPanel key={activeSchedule.sha256} lines={formLines} model={activeSchedule.model} />}
           <FinalPvrForm key={caseId} caseId={caseId} title={c.title} lines={formLines} reportReady={formReady} whatIf={whatIf} blockers={formBlockers} drawingNotes={handoff?.openQuestions.filter(q=>q.id.startsWith('referenced-drawing-')).map(q=>q.issue)} verifyDrawingRevisions={drawingsAreCurrent} />
           {itemModal ? (

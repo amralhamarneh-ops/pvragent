@@ -3,7 +3,7 @@ FROM node:22-bookworm-slim
 # Native/OCR runtime libs for @napi-rs/canvas and tesseract.js, plus virtual display for ODA File Converter.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 poppler-utils tesseract-ocr-eng ca-certificates curl xvfb libfontconfig1 libfreetype6 \
-      build-essential autoconf automake libtool pkg-config git texinfo \
+      build-essential autoconf automake libtool pkg-config git texinfo openjdk-17-jdk-headless unzip patch \
     && rm -rf /var/lib/apt/lists/*
 
 # GNU LibreDWG (dwg2dxf) built from a pinned release tag. GPLv3. Supports a subset of DWG versions.
@@ -20,6 +20,9 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev --no-audit --no-fund
 COPY src ./src
+COPY cpm ./cpm
+RUN sh ./cpm/install.sh /opt/pvr-cpm
+ENV PVR_MPXJ_CLASSPATH=/opt/pvr-cpm/classes:/opt/pvr-cpm/lib/*
 USER node
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s CMD curl -fsS http://localhost:8080/health || exit 1

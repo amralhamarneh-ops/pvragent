@@ -1,15 +1,16 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import LiveAnalysisPreview from './LiveAnalysisPreview';
 import RealDrawingViewer from './RealDrawingViewer';
+import DrawingChangeSheets from '@/app/pvr-demo/DrawingChangeSheets';
 import { initialRun, type RunState } from '@/lib/drawings/runState';
 import type { SavedDrawingReplay as Replay } from '@/lib/drawings/replay';
 import type { ReconciledChange } from '@/lib/drawings/types';
 
 const FINISHED: RunState = { ...initialRun(), status:'complete' };
 
-export default function SavedDrawingReplay({ replay, changes }: { replay: Replay; changes: ReconciledChange[] }) {
+export default function SavedDrawingReplay({ replay, changes, showSheets = false }: { replay: Replay; changes: ReconciledChange[]; showSheets?: boolean }) {
   const [pairIndex, setPairIndex] = useState(0);
   const [opened, setOpened] = useState(false);
   const [replaying, setReplaying] = useState(false);
@@ -27,8 +28,9 @@ export default function SavedDrawingReplay({ replay, changes }: { replay: Replay
         </select>
       </label> : null}
       {replay.eligiblePairCount > replay.models.length ? <p className="text-sm text-muted-foreground">Replay stored for {replay.models.length} of {replay.eligiblePairCount} drawing pairs. Large pairs are not stored for replay.</p> : null}
+      {showSheets && !replaying ? <DrawingChangeSheets key={pairIndex} model={model} changes={changes} /> : null}
       <LiveAnalysisPreview run={FINISHED} finishedLayers={layers} replayOnly onCancel={stop} replaying={replaying} onReplayStart={start} onReplayStop={stop} onReveal={setReveal} />
-      {opened ? <RealDrawingViewer model={model} changes={changes} selectedChangeId={change} onSelectChange={setChange} revealedLayers={replaying ? reveal : null} replaying={replaying} /> : null}
+      {opened && (!showSheets || replaying) ? <RealDrawingViewer model={model} changes={changes} selectedChangeId={change} onSelectChange={setChange} revealedLayers={replaying ? reveal : null} replaying={replaying} /> : null}
     </section>
   );
 }

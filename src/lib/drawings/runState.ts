@@ -105,7 +105,7 @@ export function runReducer(s: RunState, a: RunAction): RunState {
       const events = s.events.length >= MAX_EVENTS ? [...s.events.slice(-(MAX_EVENTS - 1)), light] : [...s.events, light];
       return { ...s, events, stages, layers, live: batch ? applyBatch(s.live, batch) : s.live, geometryVersion: batch ? s.geometryVersion + 1 : s.geometryVersion };
     }
-    case 'complete': return a.runId === s.runId && a.caseId === s.caseId && s.status === 'running' ? { ...s, status: 'complete' } : { ...s, ignored: s.ignored + 1 };
+    case 'complete': return a.runId === s.runId && a.caseId === s.caseId && s.status === 'running' ? { ...s, status: 'complete', stages: s.stages.loading === 'active' ? { ...s.stages, loading: 'done' } : s.stages } : { ...s, ignored: s.ignored + 1 };
     case 'fail': return a.runId === s.runId && a.caseId === s.caseId && s.status === 'running' ? { ...s, status: 'failed' } : { ...s, ignored: s.ignored + 1 };
     case 'cancel': return a.runId === s.runId && a.caseId === s.caseId && s.status === 'running' ? { ...s, status: 'cancelled' } : s;
     default: return s;

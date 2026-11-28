@@ -1,0 +1,7 @@
+MPXJ 16.9.0, copyright Jon Iles and contributors. LGPL 2.1 or later.
+Upstream project: https://www.mpxj.org/
+Corresponding upstream source: https://repo.maven.apache.org/maven2/net/sf/mpxj/mpxj/16.9.0/mpxj-16.9.0-sources.jar
+
+The PVRAgent modification dated 2026-11-28 changes the retained-logic handling of selected Finish-to-Finish relationships in PrimaveraScheduler. The resulting modified MPXJ class is available under the same LGPL 2.1-or-later terms. The complete upstream source archive, modified source file, patch and licence are included in the worker distribution's CPM source directory. This is a separately replaceable library on the JVM classpath. PVR case files and reports are not part of the library distribution.
+
+The JVM classpath also includes separately distributed jsoup (MIT) and Jakarta XML Binding API (as described in its jar's licence files).

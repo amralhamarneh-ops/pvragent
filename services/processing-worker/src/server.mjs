@@ -16,6 +16,8 @@ import { startRunner, runnerState } from './runner.mjs';
 import { storeConfig } from './store.mjs';
 import { readDxfForWorker } from './dxf.mjs';
 
+import { scheduleCpmRoute } from './scheduleCpmRoute.mjs';
+
 const PORT = Number(process.env.PORT || 8080);
 const TOKEN = process.env.WORKER_API_TOKEN || '';
 const ALLOWED_EXT = new Set(['pdf', 'docx', 'png', 'jpg', 'jpeg', 'dwg']);
@@ -74,9 +76,11 @@ const server = http.createServer(async (req, res) => {
       const rasterizer = await scanRasterizerReady();
       try { ocrLanguageOptions(); await import('tesseract.js'); ocr = true; } catch {}
       const sc = storeConfig();
-      return json(res, 200, { status: 'ok', service: 'pvr-processing-worker', authConfigured: !!TOKEN, limits: LIMITS, running: manager.running, queued: manager.queue.length, durable: { configured: sc.ok, missing: sc.missing, runnerStarted: runnerState.started, workerId: runnerState.workerId, tasksRunning: runnerState.running, tasksProcessed: runnerState.processed, lastClaimAt: runnerState.lastClaimAt, lastError: runnerState.lastError }, dependencies: { pdfText: pdf, docx, rasteriser: rasterizer, ocrEngine: ocr, dwg: dwg.ok ? { ok: true, converter: dwg.converter, version: dwg.version } : { ok: false, reason: dwg.error } } });
+      return json(res, 200, { status: 'ok', service: 'pvr-processing-worker', authConfigured: !!TOKEN, limits: LIMITS, running: manager.running, queued: manager.queue.length, durable: { configured: sc.ok, missing: sc.missing, runnerStarted: runnerState.started, workerId: runnerState.workerId, tasksRunning: runnerState.running, tasksProcessed: runnerState.processed, lastClaimAt: runnerState.lastClaimAt, lastError: runnerState.lastError }, dependencies: { scheduleCpmConfigured: !!process.env.PVR_MPXJ_CLASSPATH, pdfText: pdf, docx, rasteriser: rasterizer, ocrEngine: ocr, dwg: dwg.ok ? { ok: true, converter: dwg.converter, version: dwg.version } : { ok: false, reason: dwg.error } } });
     }
     if (!authed(req)) return json(res, TOKEN ? 401 : 503, { error: TOKEN ? 'Unauthorised.' : 'WORKER_API_TOKEN is not configured on the worker.' });
+
+    if (req.method === 'POST' && url.pathname === '/schedule/cpm') return await scheduleCpmRoute(req,res,json);
 
     // Functional tests (authenticated, no persistence): run a REAL operation on supplied bytes and report what happened.
     //   POST /selftest/dwg   body = DWG bytes   -> converts through the configured converter and reads the DXF
